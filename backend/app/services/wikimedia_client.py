@@ -16,7 +16,8 @@ from ..models import Article
 
 WIKIMEDIA_BASE_URL = "https://wikimedia.org"
 WIKIMEDIA_USER_AGENT = (
-    "WikiPulse/0.1 (AI Builder audience-trend project; Wikimedia Pageviews client)"
+    "WikiPulse/0.1 (AI Builder audience-trend project; Wikimedia Pageviews client; "
+    "https://github.com/anjalipandey21/WikiPulse)"
 )
 REQUEST_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 MAX_RETRIES = 2

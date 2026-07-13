@@ -1,3 +1,5 @@
 fastapi
 httpx
 pydantic
+scikit-learn
+sentence-transformers

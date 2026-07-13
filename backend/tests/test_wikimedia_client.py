@@ -25,6 +25,10 @@ class WikimediaPageviewsClientTests(unittest.IsolatedAsyncioTestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             requested_paths.append(request.url.path)
             self.assertEqual(request.headers["User-Agent"], WIKIMEDIA_USER_AGENT)
+            self.assertIn(
+                "https://github.com/anjalipandey21/WikiPulse",
+                request.headers["User-Agent"],
+            )
             return httpx.Response(200, json=pageviews_payload("Caf%C3%A9_Test", 10))
 
         transport = httpx.MockTransport(handler)
