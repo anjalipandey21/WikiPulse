@@ -172,7 +172,10 @@ def prepare_audience_clusters(
     total_analyzed_views: int,
 ) -> AudiencePreparation:
     """Select evidence and create stable references for eligible clusters."""
-    _validate_total_analyzed_views(total_analyzed_views)
+    _validate_total_analyzed_views(
+        total_analyzed_views,
+        allow_zero=not eligible_clusters,
+    )
 
     seen_cluster_ids: set[str] = set()
     seen_article_ids: set[int] = set()
@@ -427,11 +430,16 @@ def finalize_audience_decisions(
     )
 
 
-def _validate_total_analyzed_views(total_analyzed_views: int) -> None:
+def _validate_total_analyzed_views(
+    total_analyzed_views: int,
+    *,
+    allow_zero: bool,
+) -> None:
     if (
         isinstance(total_analyzed_views, bool)
         or not isinstance(total_analyzed_views, int)
-        or total_analyzed_views <= 0
+        or total_analyzed_views < 0
+        or (total_analyzed_views == 0 and not allow_zero)
     ):
         raise AudienceSourceIntegrityError(INVALID_TOTAL_ANALYZED_VIEWS)
 

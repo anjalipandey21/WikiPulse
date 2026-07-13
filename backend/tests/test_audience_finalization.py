@@ -103,6 +103,17 @@ def make_skip_decision(cluster_id: str) -> SkipClusterDecision:
 
 
 class AudiencePreparationTests(unittest.TestCase):
+    def test_allows_zero_total_only_for_empty_preparation(self) -> None:
+        preparation = prepare_audience_clusters(
+            [],
+            total_analyzed_views=0,
+        )
+
+        self.assertEqual(preparation.clusters, ())
+        self.assertEqual(preparation.contexts, ())
+        self.assertEqual(preparation.total_analyzed_views, 0)
+        self.assertEqual(dict(preparation.reference_cluster_ids), {})
+
     def test_normalizes_and_truncates_long_summary_context(self) -> None:
         cluster = make_cluster("long-summary")
         long_summary = "  Alpha\n\tbeta  " + "gamma delta  " * 150
