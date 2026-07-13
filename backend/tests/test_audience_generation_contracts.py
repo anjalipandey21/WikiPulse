@@ -1,6 +1,7 @@
 """Focused tests for internal audience-generation contracts."""
 
 from collections.abc import Sequence
+import json
 import unittest
 
 from pydantic import ValidationError
@@ -92,6 +93,14 @@ class FakeAudienceProvider:
 
 
 class AudienceGenerationContractTests(unittest.TestCase):
+    def test_audience_schema_uses_two_any_of_branches(self) -> None:
+        schema = AudienceGenerationResponse.model_json_schema()
+        decision_schema = schema["properties"]["decisions"]["items"]
+
+        self.assertIn("anyOf", decision_schema)
+        self.assertEqual(len(decision_schema["anyOf"]), 2)
+        self.assertNotIn('"oneOf"', json.dumps(schema, sort_keys=True))
+
     def test_accepts_valid_create_and_skip_decisions(self) -> None:
         response = AudienceGenerationResponse.model_validate(
             {

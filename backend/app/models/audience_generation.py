@@ -144,10 +144,7 @@ class SkipClusterDecision(StrictAudienceContract):
     reason: ReasonText
 
 
-AudienceDecision = Annotated[
-    CreateAudienceDecision | SkipClusterDecision,
-    Field(discriminator="decision"),
-]
+AudienceDecision = CreateAudienceDecision | SkipClusterDecision
 
 
 class AudienceGenerationResponse(StrictAudienceContract):
