@@ -35,6 +35,7 @@ def audience_segment_data() -> dict[str, object]:
         "brand_categories": ["Example"],
         "supporting_articles": [article],
         "commercial_confidence": 0.5,
+        "commercial_confidence_reason": "Representative confidence rationale.",
     }
 
 
