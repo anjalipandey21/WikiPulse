@@ -1,0 +1,1 @@
+"""WikiPulse backend application package."""
