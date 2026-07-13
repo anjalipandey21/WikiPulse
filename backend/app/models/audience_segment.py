@@ -20,3 +20,4 @@ class AudienceSegment(BaseModel):
     brand_categories: list[str]
     supporting_articles: list[Article]
     commercial_confidence: float = Field(ge=0, le=1)
+    commercial_confidence_reason: str
