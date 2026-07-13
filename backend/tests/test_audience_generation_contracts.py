@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.agent.audience_provider import (
     AudienceGenerationProvider,
     AudienceProviderResult,
+    AudienceRevisionRequest,
     AudienceTokenUsage,
 )
 from app.models.audience_generation import (
@@ -90,6 +91,12 @@ class FakeAudienceProvider:
     ) -> AudienceProviderResult:
         self.received_contexts = cluster_contexts
         return self.result
+
+    async def revise(
+        self,
+        revision_requests: Sequence[AudienceRevisionRequest],
+    ) -> AudienceProviderResult:
+        raise AssertionError("revision was not expected in this contract test")
 
 
 class AudienceGenerationContractTests(unittest.TestCase):

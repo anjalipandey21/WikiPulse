@@ -1,5 +1,6 @@
 """Mocked tests for the structured OpenAI audience provider."""
 
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -7,6 +8,10 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 from openai import APIConnectionError
 
+from app.agent.audience_provider import (
+    AudienceRevisionIssue,
+    AudienceRevisionRequest,
+)
 from app.agent.openai_audience_provider import (
     AudienceProviderError,
     DEFAULT_OPENAI_AUDIENCE_MODEL,
@@ -184,6 +189,82 @@ class OpenAIAudienceProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage.input_tokens, 321)
         self.assertEqual(result.usage.output_tokens, 123)
         self.assertEqual(result.usage.total_tokens, 444)
+
+    async def test_sends_only_requested_revision_context_and_exact_issues(
+        self,
+    ) -> None:
+        parsed = make_typed_response("cluster-one")
+        api_response = make_api_response(parsed=parsed)
+        client = Mock()
+        client.responses.parse = AsyncMock(return_value=api_response)
+        provider = OpenAIAudienceProvider(client, model="configured-model")
+        revision_request = AudienceRevisionRequest(
+            context=make_context("cluster-one"),
+            previous_decisions=tuple(parsed.decisions),
+            validation_issues=(
+                AudienceRevisionIssue(
+                    code="cross_cluster_supporting_reference",
+                    reference_id="cluster-two:a0",
+                ),
+                AudienceRevisionIssue(
+                    code="unknown_supporting_reference",
+                    reference_id="cluster-one:a9",
+                ),
+            ),
+        )
+
+        result = await provider.revise([revision_request])
+
+        client.responses.parse.assert_awaited_once()
+        request = client.responses.parse.await_args.kwargs
+        self.assertEqual(request["model"], "configured-model")
+        self.assertIs(request["text_format"], AudienceGenerationResponse)
+        self.assertEqual(request["reasoning"], {"effort": "none"})
+        self.assertIs(request["store"], False)
+        self.assertEqual(request["timeout"], OPENAI_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(request["max_output_tokens"], MAX_OUTPUT_TOKENS)
+
+        user_content = request["input"][1]["content"]
+        revision_payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(len(revision_payload), 1)
+        self.assertEqual(
+            set(revision_payload[0]),
+            {"cluster_context", "previous_decisions", "validation_issues"},
+        )
+        self.assertEqual(
+            revision_payload[0]["cluster_context"]["cluster_id"],
+            "cluster-one",
+        )
+        self.assertEqual(len(revision_payload[0]["previous_decisions"]), 1)
+        self.assertEqual(
+            revision_payload[0]["validation_issues"],
+            [
+                {
+                    "code": "cross_cluster_supporting_reference",
+                    "reference_id": "cluster-two:a0",
+                },
+                {
+                    "code": "unknown_supporting_reference",
+                    "reference_id": "cluster-one:a9",
+                },
+            ],
+        )
+        self.assertNotIn('"cluster_id":"cluster-two"', user_content)
+        self.assertNotIn("size_index", user_content)
+        self.assertIs(result.response, parsed)
+
+    async def test_empty_revision_does_not_call_api(self) -> None:
+        client = Mock()
+        client.responses.parse = AsyncMock()
+        provider = OpenAIAudienceProvider(client)
+
+        with self.assertRaisesRegex(
+            AudienceProviderError,
+            "requires at least one cluster",
+        ):
+            await provider.revise([])
+
+        client.responses.parse.assert_not_awaited()
 
     async def test_provider_request_failure_is_safely_translated(self) -> None:
         client = Mock()
