@@ -5,7 +5,11 @@ import unittest
 
 from pydantic import ValidationError
 
-from app.agent.audience_provider import AudienceGenerationProvider
+from app.agent.audience_provider import (
+    AudienceGenerationProvider,
+    AudienceProviderResult,
+    AudienceTokenUsage,
+)
 from app.models.audience_generation import (
     AudienceGenerationResponse,
     CompactArticleContext,
@@ -75,16 +79,16 @@ def skip_decision_data() -> dict[str, object]:
 
 
 class FakeAudienceProvider:
-    def __init__(self, response: AudienceGenerationResponse) -> None:
-        self.response = response
+    def __init__(self, result: AudienceProviderResult) -> None:
+        self.result = result
         self.received_contexts: Sequence[CompactClusterContext] | None = None
 
     async def generate(
         self,
         cluster_contexts: Sequence[CompactClusterContext],
-    ) -> AudienceGenerationResponse:
+    ) -> AudienceProviderResult:
         self.received_contexts = cluster_contexts
-        return self.response
+        return self.result
 
 
 class AudienceGenerationContractTests(unittest.TestCase):
@@ -217,11 +221,25 @@ class AudienceGenerationProviderTests(unittest.IsolatedAsyncioTestCase):
         response = AudienceGenerationResponse.model_validate(
             {"decisions": [create_decision_data()]}
         )
-        provider: AudienceGenerationProvider = FakeAudienceProvider(response)
+        expected_result = AudienceProviderResult(
+            response=response,
+            model="mock-model",
+            response_id="response-1",
+            elapsed_seconds=0.25,
+            usage=AudienceTokenUsage(
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
+            ),
+        )
+        provider: AudienceGenerationProvider = FakeAudienceProvider(
+            expected_result
+        )
 
         result = await provider.generate([context])
 
-        self.assertIs(result, response)
+        self.assertIs(result, expected_result)
+        self.assertIs(result.response, response)
         self.assertEqual(provider.received_contexts, [context])
 
 
