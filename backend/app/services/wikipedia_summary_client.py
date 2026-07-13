@@ -13,7 +13,8 @@ from ..models import Article
 
 WIKIPEDIA_BASE_URL = "https://en.wikipedia.org"
 WIKIPEDIA_USER_AGENT = (
-    "WikiPulse/0.1 (AI Builder audience-trend project; Wikipedia summary client)"
+    "WikiPulse/0.1 (AI Builder audience-trend project; Wikipedia summary client; "
+    "https://github.com/anjalipandey21/WikiPulse)"
 )
 REQUEST_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 SUMMARY_BATCH_SIZE = 20

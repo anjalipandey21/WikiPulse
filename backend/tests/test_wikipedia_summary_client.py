@@ -39,6 +39,10 @@ class WikipediaSummaryClientTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.headers["User-Agent"], WIKIPEDIA_USER_AGENT)
+            self.assertIn(
+                "https://github.com/anjalipandey21/WikiPulse",
+                request.headers["User-Agent"],
+            )
             self.assertEqual(request.url.params["exsentences"], "2")
             self.assertEqual(request.url.params["explaintext"], "1")
             titles = request.url.params["titles"].split("|")
