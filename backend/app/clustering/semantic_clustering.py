@@ -8,6 +8,7 @@ from typing import Protocol
 
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.utils.validation import check_array
 
 from ..models import Article
@@ -17,6 +18,8 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_SIMILARITY_THRESHOLD = 0.55
 MIN_CLUSTER_SIZE = 2
 EMBEDDING_BATCH_SIZE = 32
+MEAN_SIMILARITY_WEIGHT = 0.8
+MINIMUM_SIMILARITY_WEIGHT = 0.2
 
 
 class ArticleEncoder(Protocol):
@@ -50,6 +53,9 @@ class CandidateTopicCluster:
 
     id: str
     articles: tuple[Article, ...]
+    mean_similarity: float
+    minimum_similarity: float
+    cohesion_score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +93,7 @@ def group_candidate_topics(
         distance_threshold=1.0 - similarity_threshold,
         compute_full_tree=True,
     ).fit_predict(embeddings)
+    similarity_matrix = cosine_similarity(embeddings)
 
     indices_by_label: dict[int, list[int]] = {}
     for index, label in enumerate(labels):
@@ -105,10 +112,16 @@ def group_candidate_topics(
             continue
 
         cluster_articles = tuple(articles[index] for index in indices)
+        mean_similarity, minimum_similarity, cohesion_score = (
+            _calculate_cohesion(indices, similarity_matrix)
+        )
         candidate_clusters.append(
             CandidateTopicCluster(
                 id=_build_candidate_id(cluster_articles),
                 articles=cluster_articles,
+                mean_similarity=mean_similarity,
+                minimum_similarity=minimum_similarity,
+                cohesion_score=cohesion_score,
             )
         )
 
@@ -177,3 +190,22 @@ def _build_candidate_id(articles: Sequence[Article]) -> str:
     )
     digest = sha256(stable_titles.encode("utf-8")).hexdigest()[:12]
     return f"candidate-{digest}"
+
+
+def _calculate_cohesion(
+    indices: Sequence[int],
+    similarity_matrix: object,
+) -> tuple[float, float, float]:
+    pairwise_similarities = [
+        float(similarity_matrix[left_index, right_index])  # type: ignore[index]
+        for position, left_index in enumerate(indices)
+        for right_index in indices[position + 1 :]
+    ]
+    mean_similarity = sum(pairwise_similarities) / len(pairwise_similarities)
+    minimum_similarity = min(pairwise_similarities)
+    cohesion_score = (
+        MEAN_SIMILARITY_WEIGHT * mean_similarity
+        + MINIMUM_SIMILARITY_WEIGHT * minimum_similarity
+    )
+    bounded_cohesion = min(max(cohesion_score, 0.0), 1.0)
+    return mean_similarity, minimum_similarity, bounded_cohesion

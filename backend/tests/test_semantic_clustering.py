@@ -7,6 +7,8 @@ from unittest.mock import Mock, patch
 from app.clustering.semantic_clustering import (
     DEFAULT_EMBEDDING_MODEL,
     EMBEDDING_BATCH_SIZE,
+    MEAN_SIMILARITY_WEIGHT,
+    MINIMUM_SIMILARITY_WEIGHT,
     CandidateTopicCluster,
     MiniLMArticleEncoder,
     SemanticClusteringResult,
@@ -119,6 +121,35 @@ class SemanticClusteringTests(unittest.TestCase):
         self.assertEqual(grouped.clusters[0].articles, tuple(articles))
         self.assertEqual(separated.clusters, ())
         self.assertEqual(separated.unclustered_articles, tuple(articles))
+
+    def test_candidate_stores_deterministic_semantic_cohesion(self) -> None:
+        articles = [
+            make_article("Alpha"),
+            make_article("Beta"),
+            make_article("Gamma"),
+        ]
+        embeddings = [
+            [1.0, 0.0],
+            [0.8, 0.6],
+            [0.6, 0.8],
+        ]
+
+        result = group_candidate_topics(
+            articles,
+            encoder=FakeEncoder(embeddings),
+            similarity_threshold=0.5,
+        )
+
+        candidate = result.clusters[0]
+        expected_mean = (0.8 + 0.6 + 0.96) / 3
+        expected_minimum = 0.6
+        expected_cohesion = (
+            MEAN_SIMILARITY_WEIGHT * expected_mean
+            + MINIMUM_SIMILARITY_WEIGHT * expected_minimum
+        )
+        self.assertAlmostEqual(candidate.mean_similarity, expected_mean)
+        self.assertAlmostEqual(candidate.minimum_similarity, expected_minimum)
+        self.assertAlmostEqual(candidate.cohesion_score, expected_cohesion)
 
     def test_minimum_cluster_size_keeps_small_groups_unclustered(self) -> None:
         articles = [
