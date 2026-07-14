@@ -7,9 +7,13 @@ import {
 
 interface DiagnosticsPanelProps {
   result: AudienceAnalysisResponse
+  onViewTrace: (traceId: string) => void
 }
 
-export function DiagnosticsPanel({ result }: DiagnosticsPanelProps) {
+export function DiagnosticsPanel({
+  result,
+  onViewTrace,
+}: DiagnosticsPanelProps) {
   const topic = result.metrics.topic_analysis
   const funnel = result.metrics.audience_funnel
   const workflow = result.metrics.workflow
@@ -97,6 +101,13 @@ export function DiagnosticsPanel({ result }: DiagnosticsPanelProps) {
                     <li key={`provider-${item.cluster_id}`}>
                       <strong>{item.cluster_name}</strong>
                       <span>{item.reason}</span>
+                      <a
+                        className="journey-link"
+                        href={`#${item.trace_id}`}
+                        onClick={() => onViewTrace(item.trace_id)}
+                      >
+                        View agent journey
+                      </a>
                     </li>
                   ))}
                   {result.validation_drops.map((item, index) => (
@@ -110,6 +121,13 @@ export function DiagnosticsPanel({ result }: DiagnosticsPanelProps) {
                           ? ` · ${item.issues.map((issue) => humanizeCode(issue.code)).join(', ')}`
                           : ''}
                       </span>
+                      <a
+                        className="journey-link"
+                        href={`#${item.trace_id}`}
+                        onClick={() => onViewTrace(item.trace_id)}
+                      >
+                        View agent journey
+                      </a>
                     </li>
                   ))}
                 </ul>

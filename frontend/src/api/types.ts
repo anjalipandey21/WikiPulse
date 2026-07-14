@@ -4,6 +4,24 @@ export type BuyingPower = 'high' | 'medium' | 'low'
 
 export type DecisionPhase = 'initial' | 'revision'
 
+export type AudienceTracePhase = DecisionPhase | 'final'
+
+export type AudienceTraceEventCode =
+  | 'generation_requested'
+  | 'decision_received'
+  | 'validation_passed'
+  | 'validation_failed'
+  | 'revision_requested'
+  | 'revision_failed'
+  | 'audience_published'
+  | 'provider_skipped'
+  | 'decision_dropped'
+
+export type AudienceTraceOutcome =
+  | 'published'
+  | 'provider_skipped'
+  | 'validation_dropped'
+
 export interface ArticleResponse {
   title: string
   normalized_title: string
@@ -27,6 +45,7 @@ export interface TopicClusterResponse {
 }
 
 export interface AudienceSegmentResponse {
+  trace_id: string
   id: string
   name: string
   description: string
@@ -52,6 +71,7 @@ export interface CommercialSkippedClusterResponse {
 }
 
 export interface ProviderSkippedClusterResponse {
+  trace_id: string
   cluster_id: string
   cluster_name: string
   reason: string
@@ -63,11 +83,29 @@ export interface AudienceDecisionIssueResponse {
 }
 
 export interface DroppedAudienceDecisionResponse {
+  trace_id: string
   cluster_id: string
   source_known: boolean
   phase: DecisionPhase
   drop_code: string
   issues: AudienceDecisionIssueResponse[]
+}
+
+export interface AudienceTraceEventResponse {
+  sequence: number
+  phase: AudienceTracePhase
+  code: AudienceTraceEventCode
+  outcome_code: string | null
+  issues: AudienceDecisionIssueResponse[]
+}
+
+export interface AudienceDecisionTraceResponse {
+  trace_id: string
+  cluster_id: string
+  cluster_name: string | null
+  source_known: boolean
+  final_outcome: AudienceTraceOutcome
+  events: AudienceTraceEventResponse[]
 }
 
 export interface TopicAnalysisMetricsResponse {
@@ -135,6 +173,7 @@ export interface AudienceAnalysisResponse {
   commercial_skips: CommercialSkippedClusterResponse[]
   provider_skips: ProviderSkippedClusterResponse[]
   validation_drops: DroppedAudienceDecisionResponse[]
+  audience_traces: AudienceDecisionTraceResponse[]
   is_publishable: boolean
   metrics: AudienceAnalysisMetricsResponse
 }

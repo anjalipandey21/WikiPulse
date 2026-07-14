@@ -13,6 +13,7 @@ from app.agent.audience_finalization import (
     AudienceSourceIntegrityError,
 )
 from app.agent.audience_provider import AudienceProviderError
+from app.agent.audience_trace import AudienceTraceInvariantError
 from app.api.audience_analysis import AudienceAnalysisResources
 from app.audience_analysis import (
     ROUTING_PARTITION_MISMATCH,
@@ -129,6 +130,11 @@ def make_internal_result(*, empty: bool = False) -> SimpleNamespace:
         )
         workflow = SimpleNamespace(
             metrics=make_workflow_metrics(empty=True),
+            segments=(),
+            provider_skips=(),
+            dropped_decisions=(),
+            initial_validation_report=None,
+            revision_validation_report=None,
         )
         return SimpleNamespace(
             topic_analysis=topic_result,
@@ -169,6 +175,7 @@ def make_internal_result(*, empty: bool = False) -> SimpleNamespace:
     dropped = SimpleNamespace(
         cluster_id="outside",
         source_cluster=None,
+        decisions=(object(),),
         phase="initial",
         drop_code="unmatched_initial_decision",
         issues=(issue,),
@@ -185,13 +192,39 @@ def make_internal_result(*, empty: bool = False) -> SimpleNamespace:
         cluster=skipped,
         reason="The topic did not support a sufficiently specific audience.",
     )
-    workflow = SimpleNamespace(metrics=make_workflow_metrics())
+    unknown_invalid = SimpleNamespace(
+        cluster_id="outside",
+        source_cluster=None,
+        decisions=(object(),),
+        issues=(issue,),
+    )
+    initial_report = SimpleNamespace(
+        valid_segments=(segment,),
+        provider_skips=(provider_skip,),
+        invalid_decisions=(unknown_invalid,),
+    )
+    workflow = SimpleNamespace(
+        metrics=make_workflow_metrics(),
+        segments=(segment,),
+        provider_skips=(provider_skip,),
+        dropped_decisions=(dropped,),
+        initial_validation_report=initial_report,
+        revision_validation_report=None,
+    )
     return SimpleNamespace(
         topic_analysis=topic_result,
         preparation=SimpleNamespace(
             clusters=(
-                SimpleNamespace(cluster=created, cluster_id="created"),
-                SimpleNamespace(cluster=skipped, cluster_id="provider-skip"),
+                SimpleNamespace(
+                    cluster=created,
+                    cluster_id="created",
+                    context=SimpleNamespace(name=created.name),
+                ),
+                SimpleNamespace(
+                    cluster=skipped,
+                    cluster_id="provider-skip",
+                    context=SimpleNamespace(name=skipped.name),
+                ),
             )
         ),
         audience_workflow=workflow,
@@ -215,6 +248,7 @@ def make_partial_result() -> SimpleNamespace:
     dropped = SimpleNamespace(
         cluster_id="provider-skip",
         source_cluster=source_cluster,
+        decisions=(),
         phase="revision",
         drop_code="revision_provider_failure",
         issues=(
@@ -235,7 +269,26 @@ def make_partial_result() -> SimpleNamespace:
         "missing_cluster_decision": 1
     }
     workflow_metrics.drop_counts_by_code = {"revision_provider_failure": 1}
-    result.audience_workflow = SimpleNamespace(metrics=workflow_metrics)
+    missing_issue = dropped.issues[0]
+    result.audience_workflow = SimpleNamespace(
+        metrics=workflow_metrics,
+        segments=result.segments,
+        provider_skips=(),
+        dropped_decisions=(dropped,),
+        initial_validation_report=SimpleNamespace(
+            valid_segments=result.segments,
+            provider_skips=(),
+            invalid_decisions=(
+                SimpleNamespace(
+                    cluster_id="provider-skip",
+                    source_cluster=source_cluster,
+                    decisions=(),
+                    issues=(missing_issue,),
+                ),
+            ),
+        ),
+        revision_validation_report=None,
+    )
     result.provider_skips = ()
     result.dropped_decisions = (dropped,)
     result.metrics.provider_skipped_cluster_count = 0
@@ -362,6 +415,26 @@ class AudienceApiEndpointTests(unittest.TestCase):
             "provider-skip",
         )
         self.assertEqual(payload["validation_drops"][0]["cluster_id"], "outside")
+        self.assertEqual(
+            [trace["cluster_id"] for trace in payload["audience_traces"]],
+            ["created", "provider-skip", "outside"],
+        )
+        self.assertEqual(
+            payload["audience_segments"][0]["trace_id"],
+            payload["audience_traces"][0]["trace_id"],
+        )
+        self.assertEqual(
+            payload["provider_skips"][0]["trace_id"],
+            payload["audience_traces"][1]["trace_id"],
+        )
+        self.assertEqual(
+            payload["validation_drops"][0]["trace_id"],
+            payload["audience_traces"][2]["trace_id"],
+        )
+        self.assertNotIn(
+            "commercial-skip",
+            {trace["cluster_id"] for trace in payload["audience_traces"]},
+        )
         self.assertTrue(payload["is_publishable"])
         self.assertEqual(
             payload["metrics"]["workflow"]["provider_total_tokens"],
@@ -397,6 +470,7 @@ class AudienceApiEndpointTests(unittest.TestCase):
         self.assertEqual(payload["commercial_skips"], [])
         self.assertEqual(payload["provider_skips"], [])
         self.assertEqual(payload["validation_drops"], [])
+        self.assertEqual(payload["audience_traces"], [])
         self.assertTrue(payload["is_publishable"])
         self.assertEqual(
             payload["metrics"]["workflow"]["provider_call_count"],
@@ -422,7 +496,54 @@ class AudienceApiEndpointTests(unittest.TestCase):
             payload["validation_drops"][0]["drop_code"],
             "revision_provider_failure",
         )
+        self.assertEqual(
+            [
+                event["code"]
+                for event in payload["audience_traces"][1]["events"]
+            ],
+            [
+                "generation_requested",
+                "validation_failed",
+                "revision_requested",
+                "revision_failed",
+                "decision_dropped",
+            ],
+        )
         self.assertTrue(payload["is_publishable"])
+
+    def test_trace_invariant_uses_safe_analysis_invariant_envelope(self) -> None:
+        resources = make_resources()
+        application = create_app(resources=resources)
+
+        with (
+            patch(
+                "app.api.audience_analysis.analyze_audiences",
+                new=AsyncMock(return_value=make_internal_result()),
+            ),
+            patch(
+                "app.api.audience_analysis.build_audience_decision_traces",
+                side_effect=AudienceTraceInvariantError(
+                    "secret trace mismatch"
+                ),
+            ),
+            TestClient(application) as client,
+        ):
+            response = client.post("/api/audience-analysis")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.json(),
+            {
+                "error": {
+                    "code": "analysis_invariant_failed",
+                    "message": (
+                        "Audience analysis produced an inconsistent "
+                        "internal result."
+                    ),
+                }
+            },
+        )
+        self.assertNotIn("secret trace mismatch", response.text)
 
     def test_domain_and_unexpected_errors_use_safe_stable_envelopes(self) -> None:
         resources = make_resources()

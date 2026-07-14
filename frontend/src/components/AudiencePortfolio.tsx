@@ -8,11 +8,13 @@ import {
 interface AudiencePortfolioProps {
   segments: AudienceSegmentResponse[]
   topicNames: ReadonlyMap<string, string>
+  onViewTrace: (traceId: string) => void
 }
 
 export function AudiencePortfolio({
   segments,
   topicNames,
+  onViewTrace,
 }: AudiencePortfolioProps) {
   return (
     <section className="dashboard-section" aria-labelledby="portfolio-title">
@@ -97,6 +99,13 @@ export function AudiencePortfolio({
                   ))}
                 </ul>
               </div>
+              <a
+                className="journey-link"
+                href={`#${segment.trace_id}`}
+                onClick={() => onViewTrace(segment.trace_id)}
+              >
+                View agent journey
+              </a>
             </article>
           )
         })}

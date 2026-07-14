@@ -2,8 +2,11 @@ import type {
   ApiErrorResponse,
   ArticleResponse,
   AudienceAnalysisResponse,
+  AudienceDecisionTraceResponse,
   AudienceFunnelMetricsResponse,
   AudienceSegmentResponse,
+  AudienceTraceEventCode,
+  AudienceTraceEventResponse,
   AudienceWorkflowMetricsResponse,
   CommercialSkippedClusterResponse,
   DroppedAudienceDecisionResponse,
@@ -102,8 +105,10 @@ function isAudienceAnalysisResponse(
     isArrayOf(value.commercial_skips, isCommercialSkip) &&
     isArrayOf(value.provider_skips, isProviderSkip) &&
     isArrayOf(value.validation_drops, isValidationDrop) &&
+    isArrayOf(value.audience_traces, isAudienceTrace) &&
     typeof value.is_publishable === 'boolean' &&
-    isMetrics(value.metrics)
+    isMetrics(value.metrics) &&
+    hasValidTraceAssociations(value as unknown as AudienceAnalysisResponse)
   )
 }
 
@@ -138,6 +143,7 @@ function isTopicCluster(value: unknown): value is TopicClusterResponse {
 function isAudienceSegment(value: unknown): value is AudienceSegmentResponse {
   if (!isObject(value)) return false
   return (
+    isString(value.trace_id) &&
     isString(value.id) &&
     isString(value.name) &&
     isString(value.description) &&
@@ -167,7 +173,7 @@ function isCommercialSkip(
 function isProviderSkip(
   value: unknown,
 ): value is ProviderSkippedClusterResponse {
-  return isNamedSkip(value)
+  return isNamedSkip(value) && isObject(value) && isString(value.trace_id)
 }
 
 function isNamedSkip(value: unknown): boolean {
@@ -184,6 +190,7 @@ function isValidationDrop(
 ): value is DroppedAudienceDecisionResponse {
   if (!isObject(value)) return false
   return (
+    isString(value.trace_id) &&
     isString(value.cluster_id) &&
     typeof value.source_known === 'boolean' &&
     (value.phase === 'initial' || value.phase === 'revision') &&
@@ -196,6 +203,118 @@ function isValidationDrop(
       )
     })
   )
+}
+
+function isAudienceTrace(
+  value: unknown,
+): value is AudienceDecisionTraceResponse {
+  if (!isObject(value)) return false
+  if (
+    !isString(value.trace_id) ||
+    !isString(value.cluster_id) ||
+    !(value.cluster_name === null || isString(value.cluster_name)) ||
+    typeof value.source_known !== 'boolean' ||
+    !isTraceOutcome(value.final_outcome) ||
+    !isArrayOf(value.events, isAudienceTraceEvent)
+  ) {
+    return false
+  }
+  return value.events.every((event, index) => event.sequence === index + 1)
+}
+
+function isAudienceTraceEvent(
+  value: unknown,
+): value is AudienceTraceEventResponse {
+  if (!isObject(value)) return false
+  return (
+    isNumber(value.sequence) &&
+    Number.isInteger(value.sequence) &&
+    value.sequence > 0 &&
+    (value.phase === 'initial' ||
+      value.phase === 'revision' ||
+      value.phase === 'final') &&
+    isTraceEventCode(value.code) &&
+    (value.outcome_code === null || isString(value.outcome_code)) &&
+    isArrayOf(value.issues, isDecisionIssue)
+  )
+}
+
+function isDecisionIssue(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    isString(value.code) &&
+    (value.reference_id === null || isString(value.reference_id))
+  )
+}
+
+function isTraceEventCode(value: unknown): value is AudienceTraceEventCode {
+  return (
+    value === 'generation_requested' ||
+    value === 'decision_received' ||
+    value === 'validation_passed' ||
+    value === 'validation_failed' ||
+    value === 'revision_requested' ||
+    value === 'revision_failed' ||
+    value === 'audience_published' ||
+    value === 'provider_skipped' ||
+    value === 'decision_dropped'
+  )
+}
+
+function isTraceOutcome(value: unknown): boolean {
+  return (
+    value === 'published' ||
+    value === 'provider_skipped' ||
+    value === 'validation_dropped'
+  )
+}
+
+function hasValidTraceAssociations(
+  value: AudienceAnalysisResponse,
+): boolean {
+  const tracesById = new Map(
+    value.audience_traces.map((trace) => [trace.trace_id, trace]),
+  )
+  if (tracesById.size !== value.audience_traces.length) return false
+
+  const associations = [
+    ...value.audience_segments.map((segment) => ({
+      traceId: segment.trace_id,
+      outcome: 'published',
+      clusterId:
+        segment.topic_cluster_ids.length === 1
+          ? segment.topic_cluster_ids[0]
+          : null,
+      sourceKnown: true,
+    } as const)),
+    ...value.provider_skips.map((skipped) => ({
+      traceId: skipped.trace_id,
+      outcome: 'provider_skipped',
+      clusterId: skipped.cluster_id,
+      sourceKnown: true,
+    } as const)),
+    ...value.validation_drops.map((dropped) => ({
+      traceId: dropped.trace_id,
+      outcome: 'validation_dropped',
+      clusterId: dropped.cluster_id,
+      sourceKnown: dropped.source_known,
+    } as const)),
+  ]
+  if (
+    associations.length !== value.audience_traces.length ||
+    new Set(associations.map((item) => item.traceId)).size !==
+      associations.length
+  ) {
+    return false
+  }
+  return associations.every((association) => {
+    const trace = tracesById.get(association.traceId)
+    return (
+      trace?.final_outcome === association.outcome &&
+      trace.cluster_id === association.clusterId &&
+      trace.source_known === association.sourceKnown
+    )
+  })
 }
 
 function isMetrics(value: unknown): boolean {
