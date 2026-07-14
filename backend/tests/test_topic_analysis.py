@@ -1,12 +1,15 @@
 """Focused mocked tests for deterministic topic-analysis orchestration."""
 
 from collections.abc import Sequence
+import asyncio
 from datetime import date
+import threading
 import unittest
 from unittest.mock import patch
 
 from app.clustering.semantic_clustering import SemanticClusteringResult
 from app.models import Article
+from app.progress import AnalysisProgressStage
 from app.services.wikimedia_client import WikimediaPageviewsError
 from app.services.wikipedia_summary_client import WikipediaSummaryError
 from app.topic_analysis import (
@@ -147,6 +150,10 @@ class TopicAnalysisTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         analysis_date = date(2026, 7, 13)
+        progress: list[AnalysisProgressStage] = []
+
+        async def report(stage: AnalysisProgressStage) -> None:
+            progress.append(stage)
 
         result = await analyze_topics(
             pageview_client,
@@ -155,6 +162,7 @@ class TopicAnalysisTests(unittest.IsolatedAsyncioTestCase):
             today_utc=analysis_date,
             top_n=3,
             similarity_threshold=0.8,
+            progress_reporter=report,
         )
 
         self.assertEqual(pageview_client.today_utc, analysis_date)
@@ -211,6 +219,15 @@ class TopicAnalysisTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(pageview_client.closed)
         self.assertFalse(summary_client.closed)
+        self.assertEqual(
+            progress,
+            [
+                "fetching_pageviews",
+                "selecting_articles",
+                "enriching_summaries",
+                "modeling_topics",
+            ],
+        )
 
     async def test_summary_failure_logs_and_continues_with_existing_data(self) -> None:
         first = make_article(
@@ -325,6 +342,40 @@ class TopicAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(encoder.encoded_texts)
         self.assertEqual(result.metrics.selected_article_count, 0)
         self.assertEqual(result.metrics.selected_pageviews, 0)
+
+    async def test_cancellation_waits_for_topic_worker_to_release_resources(
+        self,
+    ) -> None:
+        article = make_article("Worker topic", 100)
+        pageview_client = FakePageviewClient([article])
+        summary_client = FakeSummaryClient()
+        encoder = FakeEncoder([])
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def blocking_analysis(
+            enriched_articles: Sequence[Article],
+            **_: object,
+        ) -> tuple[tuple[object, ...], tuple[Article, ...]]:
+            worker_started.set()
+            release_worker.wait(timeout=5)
+            return (), tuple(enriched_articles)
+
+        with patch(
+            "app.topic_analysis._analyze_enriched_articles",
+            side_effect=blocking_analysis,
+        ):
+            task = asyncio.create_task(
+                analyze_topics(pageview_client, summary_client, encoder)
+            )
+            started = await asyncio.to_thread(worker_started.wait, 2)
+            self.assertTrue(started)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            release_worker.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
 
 if __name__ == "__main__":

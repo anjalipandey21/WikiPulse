@@ -1,9 +1,11 @@
 """Public Pydantic contracts for the audience-analysis API."""
 
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..progress import AnalysisProgressStage
 
 
 class ArticleResponse(BaseModel):
@@ -217,3 +219,42 @@ class ApiErrorResponse(BaseModel):
     """Consistent error envelope for API failures."""
 
     error: ApiErrorDetailResponse
+
+
+class AudienceAnalysisProgressEvent(BaseModel):
+    """One fixed-code stage transition in a live analysis stream."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["progress"] = "progress"
+    sequence: int = Field(ge=1)
+    stage: AnalysisProgressStage
+
+
+class AudienceAnalysisResultEvent(BaseModel):
+    """Successful terminal event containing the existing public response."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["result"] = "result"
+    sequence: int = Field(ge=1)
+    result: AudienceAnalysisResponse
+
+
+class AudienceAnalysisErrorEvent(BaseModel):
+    """Failed terminal event containing only a safe public error."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    type: Literal["error"] = "error"
+    sequence: int = Field(ge=1)
+    status_code: int = Field(ge=400, le=599)
+    error: ApiErrorDetailResponse
+
+
+AudienceAnalysisStreamEvent = Annotated[
+    AudienceAnalysisProgressEvent
+    | AudienceAnalysisResultEvent
+    | AudienceAnalysisErrorEvent,
+    Field(discriminator="type"),
+]

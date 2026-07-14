@@ -32,6 +32,7 @@ from app.models.audience_generation import (
     CreateAudienceDecision,
     SkipClusterDecision,
 )
+from app.progress import AnalysisProgressStage
 
 
 def make_article(title: str, views: int) -> Article:
@@ -177,7 +178,16 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         provider = FakeAudienceProvider(None)
 
-        result = await run_audience_workflow(preparation, provider)
+        progress: list[AnalysisProgressStage] = []
+
+        async def report(stage: AnalysisProgressStage) -> None:
+            progress.append(stage)
+
+        result = await run_audience_workflow(
+            preparation,
+            provider,
+            progress_reporter=report,
+        )
 
         self.assertTrue(result.is_publishable)
         self.assertEqual(result.segments, ())
@@ -186,6 +196,7 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.generate_call_count, 0)
         self.assertEqual(provider.revise_call_count, 0)
         self.assertEqual(result.metrics.provider_call_count, 0)
+        self.assertEqual(progress, ["finalizing_audience_results"])
 
     async def test_fatal_initial_provider_error_identity_is_preserved(
         self,
@@ -204,6 +215,32 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await run_audience_workflow(preparation, provider)
 
         self.assertIs(raised.exception, source_error)
+        self.assertEqual(provider.generate_call_count, 1)
+        self.assertEqual(provider.revise_call_count, 0)
+
+    async def test_streaming_initial_provider_error_identity_is_preserved(
+        self,
+    ) -> None:
+        preparation = prepare_audience_clusters(
+            [make_cluster("source")],
+            total_analyzed_views=1_000,
+        )
+        source_error = AudienceProviderError("safe initial failure")
+        provider = FakeAudienceProvider(None, initial_error=source_error)
+        progress: list[AnalysisProgressStage] = []
+
+        async def report(stage: AnalysisProgressStage) -> None:
+            progress.append(stage)
+
+        with self.assertRaises(AudienceProviderError) as raised:
+            await run_audience_workflow(
+                preparation,
+                provider,
+                progress_reporter=report,
+            )
+
+        self.assertIs(raised.exception, source_error)
+        self.assertEqual(progress, ["generating_audience_decisions"])
         self.assertEqual(provider.generate_call_count, 1)
         self.assertEqual(provider.revise_call_count, 0)
 
@@ -401,7 +438,16 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        result = await run_audience_workflow(preparation, provider)
+        progress: list[AnalysisProgressStage] = []
+
+        async def report(stage: AnalysisProgressStage) -> None:
+            progress.append(stage)
+
+        result = await run_audience_workflow(
+            preparation,
+            provider,
+            progress_reporter=report,
+        )
 
         self.assertTrue(result.is_publishable)
         self.assertEqual(MAX_REVISIONS, 1)
@@ -434,6 +480,16 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
             dict(result.metrics.drop_counts_by_code),
             {UNRESOLVED_AFTER_REVISION: 3},
         )
+        self.assertEqual(
+            progress,
+            [
+                "generating_audience_decisions",
+                "validating_audience_decisions",
+                "revising_audience_decisions",
+                "validating_revised_decisions",
+                "finalizing_audience_results",
+            ],
+        )
 
     async def test_revision_failure_preserves_valid_and_drops_pending(self) -> None:
         clusters = [make_cluster("valid"), make_cluster("missing")]
@@ -446,7 +502,16 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
             revision_error=AudienceProviderError("safe revision failure"),
         )
 
-        result = await run_audience_workflow(preparation, provider)
+        progress: list[AnalysisProgressStage] = []
+
+        async def report(stage: AnalysisProgressStage) -> None:
+            progress.append(stage)
+
+        result = await run_audience_workflow(
+            preparation,
+            provider,
+            progress_reporter=report,
+        )
 
         self.assertTrue(result.is_publishable)
         self.assertEqual(provider.revise_call_count, 1)
@@ -468,6 +533,15 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             dict(result.metrics.drop_counts_by_code),
             {REVISION_PROVIDER_FAILURE: 1},
+        )
+        self.assertEqual(
+            progress,
+            [
+                "generating_audience_decisions",
+                "validating_audience_decisions",
+                "revising_audience_decisions",
+                "finalizing_audience_results",
+            ],
         )
 
 

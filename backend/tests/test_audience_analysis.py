@@ -38,6 +38,7 @@ from app.models.audience_generation import (
     CreateAudienceDecision,
     SkipClusterDecision,
 )
+from app.progress import AnalysisProgressStage
 from app.topic_analysis import TopicAnalysisMetrics, TopicAnalysisResult
 
 
@@ -196,6 +197,49 @@ class FakeAudienceProvider:
 
 
 class AudienceAnalysisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reports_routing_preparation_and_graph_boundaries(self) -> None:
+        cluster = make_cluster("eligible", (400, 300))
+        topic_result = make_topic_result(
+            [cluster],
+            selected_pageviews=700,
+        )
+        provider = FakeAudienceProvider(
+            AudienceGenerationResponse(
+                decisions=[make_create_decision("eligible")]
+            )
+        )
+        progress: list[AnalysisProgressStage] = []
+
+        async def report(stage: AnalysisProgressStage) -> None:
+            progress.append(stage)
+
+        with patch(
+            "app.audience_analysis.analyze_topics",
+            new=AsyncMock(return_value=topic_result),
+        ) as analyze_topics_mock:
+            await analyze_audiences(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                provider,
+                progress_reporter=report,
+            )
+
+        self.assertIs(
+            analyze_topics_mock.await_args.kwargs["progress_reporter"],
+            report,
+        )
+        self.assertEqual(
+            progress,
+            [
+                "routing_commercial_clusters",
+                "preparing_audience_evidence",
+                "generating_audience_decisions",
+                "validating_audience_decisions",
+                "finalizing_audience_results",
+            ],
+        )
+
     async def test_composes_stages_and_uses_prepared_pageview_snapshots(
         self,
     ) -> None:

@@ -2,11 +2,13 @@
 
 import asyncio
 from datetime import date
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.agent.audience_finalization import (
     INVALID_TOTAL_ANALYZED_VIEWS,
@@ -14,13 +16,20 @@ from app.agent.audience_finalization import (
 )
 from app.agent.audience_provider import AudienceProviderError
 from app.agent.audience_trace import AudienceTraceInvariantError
-from app.api.audience_analysis import AudienceAnalysisResources
+from app.api.audience_analysis import (
+    STREAM_MEDIA_TYPE,
+    STREAM_QUEUE_MAXSIZE,
+    AudienceAnalysisResources,
+    _stream_analysis_events,
+    map_audience_analysis_response,
+)
 from app.audience_analysis import (
     ROUTING_PARTITION_MISMATCH,
     AudienceAnalysisInvariantError,
 )
 from app.main import create_app
 from app.models import Article, AudienceSegment, TopicCluster
+from app.models.audience_api import AudienceAnalysisProgressEvent
 from app.services.wikimedia_client import WikimediaPageviewsError
 from app.services.wikipedia_summary_client import WikipediaSummaryError
 
@@ -374,6 +383,97 @@ class AudienceApiLifecycleTests(unittest.TestCase):
 
 
 class AudienceApiEndpointTests(unittest.TestCase):
+    def test_progress_event_contract_rejects_unknown_codes_and_extra_data(
+        self,
+    ) -> None:
+        for payload in (
+            {
+                "type": "progress",
+                "sequence": 1,
+                "stage": "invented_stage",
+            },
+            {
+                "type": "progress",
+                "sequence": 1,
+                "stage": "fetching_pageviews",
+                "metadata": {"private": True},
+            },
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValidationError):
+                    AudienceAnalysisProgressEvent.model_validate(payload)
+
+    def test_streams_fixed_progress_and_exact_existing_response(self) -> None:
+        resources = make_resources()
+        internal_result = make_internal_result()
+
+        async def analyze(*args, progress_reporter, **kwargs):
+            await progress_reporter("fetching_pageviews")
+            await progress_reporter("modeling_topics")
+            return internal_result
+
+        application = create_app(resources=resources)
+        with (
+            patch("app.api.audience_analysis.analyze_audiences", new=analyze),
+            TestClient(application) as client,
+        ):
+            response = client.post("/api/audience-analysis/stream")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(STREAM_MEDIA_TYPE, response.headers["content-type"])
+        events = [json.loads(line) for line in response.text.splitlines()]
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["progress", "progress", "progress", "progress", "result"],
+        )
+        self.assertEqual(
+            [event["sequence"] for event in events],
+            [1, 2, 3, 4, 5],
+        )
+        self.assertEqual(
+            [event["stage"] for event in events[:-1]],
+            [
+                "waiting_for_slot",
+                "fetching_pageviews",
+                "modeling_topics",
+                "assembling_response",
+            ],
+        )
+        self.assertEqual(
+            events[-1]["result"],
+            map_audience_analysis_response(internal_result).model_dump(
+                mode="json"
+            ),
+        )
+
+    def test_stream_uses_safe_terminal_error_without_exception_details(self) -> None:
+        resources = make_resources()
+        application = create_app(resources=resources)
+        failure = AudienceProviderError("secret prompt and response body")
+
+        with (
+            patch(
+                "app.api.audience_analysis.analyze_audiences",
+                new=AsyncMock(side_effect=failure),
+            ),
+            TestClient(application) as client,
+        ):
+            response = client.post("/api/audience-analysis/stream")
+
+        events = [json.loads(line) for line in response.text.splitlines()]
+        self.assertEqual([event["type"] for event in events], ["progress", "error"])
+        self.assertEqual(events[-1]["status_code"], 502)
+        self.assertEqual(
+            events[-1]["error"],
+            {
+                "code": "audience_provider_unavailable",
+                "message": "Audience generation is temporarily unavailable.",
+            },
+        )
+        self.assertNotIn("secret prompt", response.text)
+        self.assertNotIn("response body", response.text)
+        self.assertEqual(STREAM_QUEUE_MAXSIZE, 16)
+
     def test_serializes_public_output_and_reuses_injected_resources(self) -> None:
         resources = make_resources()
         internal_result = make_internal_result()
@@ -623,6 +723,33 @@ class AudienceApiEndpointTests(unittest.TestCase):
             },
         )
         self.assertNotIn("bad", response.text)
+
+
+class AudienceApiStreamCancellationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_closing_stream_cancels_producer_and_releases_lock(self) -> None:
+        resources = make_resources()
+        analysis_cancelled = asyncio.Event()
+
+        async def blocking_analysis(*args, progress_reporter, **kwargs):
+            await progress_reporter("fetching_pageviews")
+            try:
+                await asyncio.Event().wait()
+            finally:
+                analysis_cancelled.set()
+
+        with patch(
+            "app.api.audience_analysis.analyze_audiences",
+            new=blocking_analysis,
+        ):
+            stream = _stream_analysis_events(resources)
+            first = json.loads((await anext(stream)).decode("utf-8"))
+            second = json.loads((await anext(stream)).decode("utf-8"))
+            self.assertEqual(first["stage"], "waiting_for_slot")
+            self.assertEqual(second["stage"], "fetching_pageviews")
+            await stream.aclose()
+
+        await asyncio.wait_for(analysis_cancelled.wait(), timeout=1)
+        self.assertFalse(resources.analysis_lock.locked())
 
 
 if __name__ == "__main__":

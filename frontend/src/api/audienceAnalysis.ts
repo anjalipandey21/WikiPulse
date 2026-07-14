@@ -1,7 +1,11 @@
 import type {
   ApiErrorResponse,
+  AnalysisProgressStage,
   ArticleResponse,
+  AudienceAnalysisErrorEvent,
+  AudienceAnalysisProgressEvent,
   AudienceAnalysisResponse,
+  AudienceAnalysisStreamEvent,
   AudienceDecisionTraceResponse,
   AudienceFunnelMetricsResponse,
   AudienceSegmentResponse,
@@ -17,7 +21,26 @@ import type {
 } from './types'
 
 const ENDPOINT = '/api/audience-analysis'
+const STREAM_ENDPOINT = '/api/audience-analysis/stream'
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+const NDJSON_MEDIA_TYPE = 'application/x-ndjson'
+const MAX_STREAM_LINE_CHARACTERS = 5_000_000
+
+const ANALYSIS_PROGRESS_STAGES = new Set<AnalysisProgressStage>([
+  'waiting_for_slot',
+  'fetching_pageviews',
+  'selecting_articles',
+  'enriching_summaries',
+  'modeling_topics',
+  'routing_commercial_clusters',
+  'preparing_audience_evidence',
+  'generating_audience_decisions',
+  'validating_audience_decisions',
+  'revising_audience_decisions',
+  'validating_revised_decisions',
+  'finalizing_audience_results',
+  'assembling_response',
+])
 
 type JsonObject = Record<string, unknown>
 
@@ -81,6 +104,170 @@ export async function runAudienceAnalysis(
   return payload
 }
 
+export async function runAudienceAnalysisStream(
+  signal: AbortSignal | undefined,
+  onProgress: (event: AudienceAnalysisProgressEvent) => void,
+): Promise<AudienceAnalysisResponse> {
+  let response: Response
+
+  try {
+    response = await fetch(STREAM_ENDPOINT, {
+      method: 'POST',
+      headers: { Accept: NDJSON_MEDIA_TYPE },
+      signal,
+    })
+  } catch (error) {
+    if (isAbortError(error)) throw error
+    throw new AudienceAnalysisApiError(
+      'network_error',
+      'WikiPulse could not reach the analysis service.',
+      0,
+    )
+  }
+
+  if (!response.ok) {
+    const payload = await readJson(response)
+    if (isApiErrorResponse(payload)) {
+      throw new AudienceAnalysisApiError(
+        payload.error.code,
+        payload.error.message,
+        response.status,
+      )
+    }
+    throw new AudienceAnalysisApiError(
+      'request_failed',
+      'The analysis service returned an unexpected error.',
+      response.status,
+    )
+  }
+
+  return parseAudienceAnalysisStream(response, onProgress)
+}
+
+export async function parseAudienceAnalysisStream(
+  response: Response,
+  onProgress: (event: AudienceAnalysisProgressEvent) => void,
+): Promise<AudienceAnalysisResponse> {
+  const contentType = response.headers.get('content-type') ?? ''
+  if (!contentType.toLowerCase().includes(NDJSON_MEDIA_TYPE)) {
+    throw invalidStreamError(response.status)
+  }
+  if (response.body === null) {
+    throw invalidStreamError(response.status)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let lastSequence = 0
+  let terminalResult: AudienceAnalysisResponse | null = null
+  let terminalError: AudienceAnalysisErrorEvent | null = null
+  let terminalSeen = false
+
+  function processLine(line: string) {
+    if (!line.trim()) throw invalidStreamError(response.status)
+    if (line.length > MAX_STREAM_LINE_CHARACTERS) {
+      throw invalidStreamError(response.status)
+    }
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(line)
+    } catch {
+      throw invalidStreamError(response.status)
+    }
+    if (!isAudienceAnalysisStreamEvent(payload)) {
+      throw invalidStreamError(response.status)
+    }
+    if (payload.sequence <= lastSequence || terminalSeen) {
+      throw invalidStreamError(response.status)
+    }
+    lastSequence = payload.sequence
+
+    if (payload.type === 'progress') {
+      onProgress(payload)
+      return
+    }
+    terminalSeen = true
+    if (payload.type === 'result') {
+      terminalResult = payload.result
+    } else {
+      terminalError = payload
+    }
+  }
+
+  function processCompleteLines() {
+    let newlineIndex = buffer.indexOf('\n')
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).replace(/\r$/, '')
+      buffer = buffer.slice(newlineIndex + 1)
+      processLine(line)
+      newlineIndex = buffer.indexOf('\n')
+    }
+    if (buffer.length > MAX_STREAM_LINE_CHARACTERS) {
+      throw invalidStreamError(response.status)
+    }
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      processCompleteLines()
+    }
+    buffer += decoder.decode()
+    if (buffer) processLine(buffer.replace(/\r$/, ''))
+    if (!terminalSeen) {
+      throw new AudienceAnalysisApiError(
+        'stream_interrupted',
+        'The live analysis stream ended before a final result was received.',
+        response.status,
+      )
+    }
+  } catch (error) {
+    if (isAbortError(error)) throw error
+    try {
+      await reader.cancel()
+    } catch {
+      // Preserve the original parsing or stream error if cancellation also fails.
+    }
+    if (error instanceof AudienceAnalysisApiError) throw error
+    throw new AudienceAnalysisApiError(
+      'stream_interrupted',
+      'The live analysis stream ended unexpectedly.',
+      response.status,
+    )
+  } finally {
+    reader.releaseLock()
+  }
+
+  const finalError = terminalError as AudienceAnalysisErrorEvent | null
+  if (finalError !== null) {
+    throw new AudienceAnalysisApiError(
+      finalError.error.code,
+      finalError.error.message,
+      finalError.status_code,
+    )
+  }
+  if (terminalResult === null) {
+    throw new AudienceAnalysisApiError(
+      'stream_interrupted',
+      'The live analysis stream ended before a final result was received.',
+      response.status,
+    )
+  }
+  return terminalResult
+}
+
+function invalidStreamError(status: number): AudienceAnalysisApiError {
+  return new AudienceAnalysisApiError(
+    'invalid_stream',
+    'The analysis service returned an invalid live response.',
+    status,
+  )
+}
+
 async function readJson(response: Response): Promise<unknown> {
   const contentType = response.headers.get('content-type') ?? ''
   if (!contentType.toLowerCase().includes('application/json')) {
@@ -110,6 +297,38 @@ function isAudienceAnalysisResponse(
     isMetrics(value.metrics) &&
     hasValidTraceAssociations(value as unknown as AudienceAnalysisResponse)
   )
+}
+
+function isAudienceAnalysisStreamEvent(
+  value: unknown,
+): value is AudienceAnalysisStreamEvent {
+  if (!isObject(value) || !isPositiveInteger(value.sequence)) return false
+  if (value.type === 'progress') {
+    return (
+      hasExactKeys(value, ['type', 'sequence', 'stage']) &&
+      isAnalysisProgressStage(value.stage)
+    )
+  }
+  if (value.type === 'result') {
+    return (
+      hasExactKeys(value, ['type', 'sequence', 'result']) &&
+      isAudienceAnalysisResponse(value.result)
+    )
+  }
+  if (value.type === 'error') {
+    return (
+      hasExactKeys(value, ['type', 'sequence', 'status_code', 'error']) &&
+      isIntegerInRange(value.status_code, 400, 599) &&
+      isApiErrorDetail(value.error)
+    )
+  }
+  return false
+}
+
+function isAnalysisProgressStage(
+  value: unknown,
+): value is AnalysisProgressStage {
+  return typeof value === 'string' && ANALYSIS_PROGRESS_STAGES.has(value as AnalysisProgressStage)
 }
 
 function isArticle(value: unknown): value is ArticleResponse {
@@ -396,11 +615,17 @@ function isWorkflowMetrics(
 }
 
 function isApiErrorResponse(value: unknown): value is ApiErrorResponse {
+  return isObject(value) && isApiErrorDetail(value.error)
+}
+
+function isApiErrorDetail(
+  value: unknown,
+): value is ApiErrorResponse['error'] {
   return (
     isObject(value) &&
-    isObject(value.error) &&
-    isString(value.error.code) &&
-    isString(value.error.message)
+    hasExactKeys(value, ['code', 'message']) &&
+    isString(value.code) &&
+    isString(value.message)
   )
 }
 
@@ -435,6 +660,35 @@ function isArrayOf(
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: JsonObject, expectedKeys: readonly string[]) {
+  const keys = Object.keys(value)
+  return (
+    keys.length === expectedKeys.length &&
+    expectedKeys.every((key) => Object.hasOwn(value, key))
+  )
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1
+}
+
+function isIntegerInRange(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+  )
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 function isString(value: unknown): value is string {

@@ -1,9 +1,13 @@
 """FastAPI endpoint and public mapping for complete audience analysis."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
+import logging
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 
 from ..agent.audience_finalization import ProviderSkippedCluster
 from ..agent.audience_provider import AudienceGenerationProvider
@@ -17,9 +21,14 @@ from ..clustering.semantic_clustering import ArticleEncoder
 from ..models import Article, AudienceSegment, TopicCluster
 from ..models.audience_api import (
     ApiErrorResponse,
+    ApiErrorDetailResponse,
     ArticleResponse,
     AudienceAnalysisMetricsResponse,
     AudienceAnalysisResponse,
+    AudienceAnalysisErrorEvent,
+    AudienceAnalysisProgressEvent,
+    AudienceAnalysisResultEvent,
+    AudienceAnalysisStreamEvent,
     AudienceDecisionTraceResponse,
     AudienceDecisionIssueResponse,
     AudienceFunnelMetricsResponse,
@@ -33,7 +42,16 @@ from ..models.audience_api import (
     TopicAnalysisMetricsResponse,
     TopicClusterResponse,
 )
+from ..progress import AnalysisProgressStage
 from ..topic_analysis import PageviewClient, SummaryClient
+from .analysis_errors import classify_analysis_exception
+
+
+logger = logging.getLogger(__name__)
+
+STREAM_QUEUE_MAXSIZE = 16
+STREAM_MEDIA_TYPE = "application/x-ndjson"
+_STREAM_END = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +105,163 @@ async def run_audience_analysis(
             resources.audience_provider,
         )
     return map_audience_analysis_response(result)
+
+
+@router.post(
+    "/audience-analysis/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "NDJSON progress followed by one terminal event.",
+            "content": {STREAM_MEDIA_TYPE: {}},
+        },
+        422: {"model": ApiErrorResponse},
+        500: {"model": ApiErrorResponse},
+        502: {"model": ApiErrorResponse},
+    },
+)
+async def stream_audience_analysis(
+    resources: AudienceAnalysisResources = Depends(
+        get_audience_analysis_resources
+    ),
+) -> StreamingResponse:
+    """Stream safe stage codes and one exact terminal analysis response."""
+    return StreamingResponse(
+        _stream_analysis_events(resources),
+        media_type=STREAM_MEDIA_TYPE,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+class _StreamEventEmitter:
+    """Assign request-local sequences and write to one bounded queue."""
+
+    def __init__(
+        self,
+        queue: asyncio.Queue[AudienceAnalysisStreamEvent | object],
+    ) -> None:
+        self._queue = queue
+        self._sequence = 0
+
+    async def progress(self, stage: AnalysisProgressStage) -> None:
+        await self._put(
+            AudienceAnalysisProgressEvent(
+                sequence=self._next_sequence(),
+                stage=stage,
+            )
+        )
+
+    async def result(self, result: AudienceAnalysisResponse) -> None:
+        await self._put(
+            AudienceAnalysisResultEvent(
+                sequence=self._next_sequence(),
+                result=result,
+            )
+        )
+
+    async def error(
+        self,
+        *,
+        status_code: int,
+        code: str,
+        message: str,
+    ) -> None:
+        await self._put(
+            AudienceAnalysisErrorEvent(
+                sequence=self._next_sequence(),
+                status_code=status_code,
+                error=ApiErrorDetailResponse(code=code, message=message),
+            )
+        )
+
+    def _next_sequence(self) -> int:
+        self._sequence += 1
+        return self._sequence
+
+    async def _put(self, event: AudienceAnalysisStreamEvent) -> None:
+        await self._queue.put(event)
+
+
+async def _stream_analysis_events(
+    resources: AudienceAnalysisResources,
+) -> AsyncIterator[bytes]:
+    queue: asyncio.Queue[AudienceAnalysisStreamEvent | object] = asyncio.Queue(
+        maxsize=STREAM_QUEUE_MAXSIZE
+    )
+    emitter = _StreamEventEmitter(queue)
+    producer = asyncio.create_task(
+        _produce_analysis_events(resources, emitter, queue)
+    )
+    try:
+        while True:
+            item = await queue.get()
+            if item is _STREAM_END:
+                break
+            if not isinstance(
+                item,
+                (
+                    AudienceAnalysisProgressEvent,
+                    AudienceAnalysisResultEvent,
+                    AudienceAnalysisErrorEvent,
+                ),
+            ):
+                continue
+            yield f"{item.model_dump_json()}\n".encode("utf-8")
+            if isinstance(
+                item,
+                (AudienceAnalysisResultEvent, AudienceAnalysisErrorEvent),
+            ):
+                break
+    finally:
+        if not producer.done():
+            producer.cancel()
+        with suppress(asyncio.CancelledError):
+            await producer
+
+
+async def _produce_analysis_events(
+    resources: AudienceAnalysisResources,
+    emitter: _StreamEventEmitter,
+    queue: asyncio.Queue[AudienceAnalysisStreamEvent | object],
+) -> None:
+    try:
+        await emitter.progress("waiting_for_slot")
+        async with resources.analysis_lock:
+            result = await analyze_audiences(
+                resources.pageview_client,
+                resources.summary_client,
+                resources.encoder,
+                resources.audience_provider,
+                progress_reporter=emitter.progress,
+            )
+        await emitter.progress("assembling_response")
+        response = map_audience_analysis_response(result)
+        await emitter.result(response)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        public_error = classify_analysis_exception(exc)
+        logger.log(
+            logging.WARNING
+            if public_error.status_code < 500
+            or public_error.status_code == 502
+            else logging.ERROR,
+            "Streaming audience analysis failed: %s",
+            type(exc).__name__,
+        )
+        await emitter.error(
+            status_code=public_error.status_code,
+            code=public_error.code,
+            message=public_error.message,
+        )
+    finally:
+        try:
+            queue.put_nowait(_STREAM_END)
+        except asyncio.QueueFull:
+            pass
 
 
 def map_audience_analysis_response(

@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   AudienceAnalysisApiError,
-  runAudienceAnalysis,
+  runAudienceAnalysisStream,
 } from './api/audienceAnalysis'
-import type { AudienceAnalysisResponse } from './api/types'
+import type {
+  AnalysisProgressStage,
+  AudienceAnalysisResponse,
+} from './api/types'
 import {
   AgentJourneyPanel,
   type AgentJourneyRequest,
@@ -21,10 +24,27 @@ interface DisplayError {
   message: string
 }
 
+const PROGRESS_COPY: Record<AnalysisProgressStage, string> = {
+  waiting_for_slot: 'Waiting for the shared analysis slot.',
+  fetching_pageviews: 'Fetching seven complete days of Wikipedia pageviews.',
+  selecting_articles: 'Filtering administrative noise and selecting articles.',
+  enriching_summaries: 'Adding short public Wikipedia summaries.',
+  modeling_topics: 'Extracting keywords and grouping related articles locally.',
+  routing_commercial_clusters: 'Applying deterministic commercial-safety rules.',
+  preparing_audience_evidence: 'Preparing traceable supporting-article evidence.',
+  generating_audience_decisions: 'Generating structured audience decisions.',
+  validating_audience_decisions: 'Validating audience evidence and references.',
+  revising_audience_decisions: 'Revising only decisions that failed validation.',
+  validating_revised_decisions: 'Validating the bounded revision results.',
+  finalizing_audience_results: 'Merging valid outcomes and explicit drops.',
+  assembling_response: 'Preparing the dashboard result.',
+}
+
 export function App() {
   const [result, setResult] = useState<AudienceAnalysisResponse | null>(null)
   const [selectedTopicId, setSelectedTopicId] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [progressStage, setProgressStage] = useState<AnalysisProgressStage | null>(null)
   const [error, setError] = useState<DisplayError | null>(null)
   const [traceRequest, setTraceRequest] = useState<AgentJourneyRequest | null>(null)
   const activeRequest = useRef<AbortController | null>(null)
@@ -44,10 +64,21 @@ export function App() {
     const controller = new AbortController()
     activeRequest.current = controller
     setIsLoading(true)
+    setProgressStage(null)
     setError(null)
 
     try {
-      const nextResult = await runAudienceAnalysis(controller.signal)
+      const nextResult = await runAudienceAnalysisStream(
+        controller.signal,
+        (event) => {
+          if (
+            isMounted.current &&
+            activeRequest.current === controller
+          ) {
+            setProgressStage(event.stage)
+          }
+        },
+      )
       if (!isMounted.current) return
       setResult(nextResult)
       setSelectedTopicId(nextResult.topics[0]?.id ?? '')
@@ -57,7 +88,10 @@ export function App() {
     } finally {
       if (activeRequest.current === controller) {
         activeRequest.current = null
-        if (isMounted.current) setIsLoading(false)
+        if (isMounted.current) {
+          setIsLoading(false)
+          setProgressStage(null)
+        }
       }
     }
   }
@@ -134,7 +168,7 @@ export function App() {
           <StatusPanel
             eyebrow="Analysis in progress"
             title="Reading the shape of the week"
-            message="WikiPulse is fetching public pageviews, finding coherent topics, and validating safe commercial audiences. This is one serialized analysis request."
+            message={progressStage ? PROGRESS_COPY[progressStage] : 'Starting one serialized analysis request.'}
             icon={<span className="loading-ring" />}
             busy
           />
@@ -174,7 +208,10 @@ export function App() {
             {isLoading ? (
               <div className="notice notice-info" role="status">
                 <span className="notice-dot" aria-hidden="true" />
-                Refreshing the analysis. The previous result remains available.
+                {progressStage
+                  ? PROGRESS_COPY[progressStage]
+                  : 'Starting the refresh.'}{' '}
+                The previous result remains available.
               </div>
             ) : null}
 
