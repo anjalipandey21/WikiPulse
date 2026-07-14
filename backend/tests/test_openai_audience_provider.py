@@ -131,6 +131,7 @@ class OpenAIAudienceProviderConfigurationTests(unittest.TestCase):
             max_retries=OPENAI_MAX_RETRIES,
         )
         self.assertEqual(provider._model, DEFAULT_OPENAI_AUDIENCE_MODEL)
+        self.assertTrue(provider._owns_client)
 
     @patch("app.agent.openai_audience_provider.AsyncOpenAI")
     def test_environment_uses_configured_model(self, async_openai: Mock) -> None:
@@ -152,6 +153,26 @@ class OpenAIAudienceProviderConfigurationTests(unittest.TestCase):
 
 
 class OpenAIAudienceProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_aclose_preserves_caller_owned_injected_client(self) -> None:
+        client = Mock()
+        client.close = AsyncMock()
+        provider = OpenAIAudienceProvider(client)
+
+        await provider.aclose()
+        await provider.aclose()
+
+        client.close.assert_not_awaited()
+
+    async def test_aclose_closes_explicitly_owned_client_once(self) -> None:
+        client = Mock()
+        client.close = AsyncMock()
+        provider = OpenAIAudienceProvider(client, owns_client=True)
+
+        await provider.aclose()
+        await provider.aclose()
+
+        client.close.assert_awaited_once_with()
+
     async def test_sends_all_contexts_once_and_returns_typed_metadata(
         self,
     ) -> None:
