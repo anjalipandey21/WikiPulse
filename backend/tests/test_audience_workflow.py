@@ -3,12 +3,14 @@
 from collections.abc import Sequence
 from datetime import date
 import unittest
+from unittest.mock import patch
 
 from app.agent.audience_finalization import (
     CROSS_CLUSTER_SUPPORTING_REFERENCE,
     MISSING_CLUSTER_DECISION,
     UNKNOWN_DECISION_CLUSTER,
     UNKNOWN_SUPPORTING_REFERENCE,
+    finalize_audience_decisions,
     prepare_audience_clusters,
 )
 from app.agent.audience_provider import (
@@ -130,10 +132,12 @@ class FakeAudienceProvider:
         initial_response: AudienceGenerationResponse | None,
         revision_response: AudienceGenerationResponse | None = None,
         *,
+        initial_error: AudienceProviderError | None = None,
         revision_error: AudienceProviderError | None = None,
     ) -> None:
         self.initial_response = initial_response
         self.revision_response = revision_response
+        self.initial_error = initial_error
         self.revision_error = revision_error
         self.generated_contexts: tuple[CompactClusterContext, ...] | None = None
         self.revision_requests: tuple[AudienceRevisionRequest, ...] | None = None
@@ -146,6 +150,8 @@ class FakeAudienceProvider:
     ) -> AudienceProviderResult:
         self.generate_call_count += 1
         self.generated_contexts = tuple(cluster_contexts)
+        if self.initial_error is not None:
+            raise self.initial_error
         if self.initial_response is None:
             raise AssertionError("generate should not have been called")
         return make_provider_result(self.initial_response, phase="initial")
@@ -181,6 +187,26 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.revise_call_count, 0)
         self.assertEqual(result.metrics.provider_call_count, 0)
 
+    async def test_fatal_initial_provider_error_identity_is_preserved(
+        self,
+    ) -> None:
+        preparation = prepare_audience_clusters(
+            [make_cluster("source")],
+            total_analyzed_views=1_000,
+        )
+        source_error = AudienceProviderError("safe initial failure")
+        provider = FakeAudienceProvider(
+            None,
+            initial_error=source_error,
+        )
+
+        with self.assertRaises(AudienceProviderError) as raised:
+            await run_audience_workflow(preparation, provider)
+
+        self.assertIs(raised.exception, source_error)
+        self.assertEqual(provider.generate_call_count, 1)
+        self.assertEqual(provider.revise_call_count, 0)
+
     async def test_all_valid_preserves_segment_and_skip_identity(self) -> None:
         clusters = [make_cluster("create"), make_cluster("skip")]
         preparation = prepare_audience_clusters(
@@ -208,6 +234,45 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.metrics.revision_count, 0)
         self.assertEqual(result.metrics.final_valid_decision_count, 2)
         self.assertEqual(result.metrics.provider_total_tokens, 150)
+
+    async def test_validates_full_preparation_then_revision_subset(
+        self,
+    ) -> None:
+        clusters = [make_cluster("valid"), make_cluster("missing")]
+        preparation = prepare_audience_clusters(
+            clusters,
+            total_analyzed_views=1_000,
+        )
+        provider = FakeAudienceProvider(
+            make_response(make_create_decision("valid")),
+            make_response(make_create_decision("missing")),
+        )
+
+        with patch(
+            "app.agent.audience_workflow.finalize_audience_decisions",
+            wraps=finalize_audience_decisions,
+        ) as finalize:
+            result = await run_audience_workflow(preparation, provider)
+
+        self.assertEqual(finalize.call_count, 2)
+        initial_preparation = finalize.call_args_list[0].args[0]
+        revision_preparation = finalize.call_args_list[1].args[0]
+        self.assertIs(initial_preparation, preparation)
+        self.assertEqual(
+            [
+                prepared.cluster_id
+                for prepared in revision_preparation.clusters
+            ],
+            ["missing"],
+        )
+        self.assertIs(revision_preparation.clusters[0].cluster, clusters[1])
+
+        initial_report = result.initial_validation_report
+        revision_report = result.revision_validation_report
+        assert initial_report is not None
+        assert revision_report is not None
+        self.assertIs(result.segments[0], initial_report.valid_segments[0])
+        self.assertIs(result.segments[1], revision_report.valid_segments[0])
 
     async def test_revises_only_known_invalid_clusters_and_merges_in_order(
         self,
@@ -307,7 +372,7 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             metrics.drop_counts_by_code["other"] = 1  # type: ignore[index]
 
-    async def test_drops_still_invalid_results_without_second_revision(
+    async def test_graph_revises_at_most_once_and_drops_still_invalid_results(
         self,
     ) -> None:
         clusters = [
@@ -339,6 +404,8 @@ class AudienceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         result = await run_audience_workflow(preparation, provider)
 
         self.assertTrue(result.is_publishable)
+        self.assertEqual(MAX_REVISIONS, 1)
+        self.assertEqual(provider.generate_call_count, 1)
         self.assertEqual(provider.revise_call_count, 1)
         self.assertEqual(
             [segment.topic_cluster_ids[0] for segment in result.segments],
