@@ -5,6 +5,10 @@ import {
   runAudienceAnalysis,
 } from './api/audienceAnalysis'
 import type { AudienceAnalysisResponse } from './api/types'
+import {
+  AgentJourneyPanel,
+  type AgentJourneyRequest,
+} from './components/AgentJourneyPanel'
 import { AudiencePortfolio } from './components/AudiencePortfolio'
 import { DiagnosticsPanel } from './components/DiagnosticsPanel'
 import { MetricSummary } from './components/MetricSummary'
@@ -22,6 +26,7 @@ export function App() {
   const [selectedTopicId, setSelectedTopicId] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<DisplayError | null>(null)
+  const [traceRequest, setTraceRequest] = useState<AgentJourneyRequest | null>(null)
   const activeRequest = useRef<AbortController | null>(null)
   const isMounted = useRef(true)
 
@@ -55,6 +60,13 @@ export function App() {
         if (isMounted.current) setIsLoading(false)
       }
     }
+  }
+
+  function handleViewTrace(traceId: string) {
+    setTraceRequest((current) => ({
+      traceId,
+      sequence: (current?.sequence ?? 0) + 1,
+    }))
   }
 
   const topicNames = new Map(
@@ -211,6 +223,7 @@ export function App() {
               <AudiencePortfolio
                 segments={result.audience_segments}
                 topicNames={topicNames}
+                onViewTrace={handleViewTrace}
               />
             ) : (
               <StatusPanel
@@ -220,7 +233,15 @@ export function App() {
               />
             )}
 
-            <DiagnosticsPanel result={result} />
+            <AgentJourneyPanel
+              traces={result.audience_traces}
+              traceRequest={traceRequest}
+            />
+
+            <DiagnosticsPanel
+              result={result}
+              onViewTrace={handleViewTrace}
+            />
           </div>
         ) : null}
       </main>

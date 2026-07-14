@@ -35,6 +35,7 @@ class TopicClusterResponse(BaseModel):
 class AudienceSegmentResponse(BaseModel):
     """Public commercial audience segment."""
 
+    trace_id: str
     id: str
     name: str
     description: str
@@ -66,6 +67,7 @@ class CommercialSkippedClusterResponse(BaseModel):
 class ProviderSkippedClusterResponse(BaseModel):
     """Valid provider decision not to create an audience."""
 
+    trace_id: str
     cluster_id: str
     cluster_name: str
     reason: str
@@ -81,11 +83,47 @@ class AudienceDecisionIssueResponse(BaseModel):
 class DroppedAudienceDecisionResponse(BaseModel):
     """Unresolved or unmatched decision excluded from publication."""
 
+    trace_id: str
     cluster_id: str
     source_known: bool
     phase: Literal["initial", "revision"]
     drop_code: str
     issues: list[AudienceDecisionIssueResponse]
+
+
+class AudienceTraceEventResponse(BaseModel):
+    """One public-safe, observable event in an audience decision journey."""
+
+    sequence: int
+    phase: Literal["initial", "revision", "final"]
+    code: Literal[
+        "generation_requested",
+        "decision_received",
+        "validation_passed",
+        "validation_failed",
+        "revision_requested",
+        "revision_failed",
+        "audience_published",
+        "provider_skipped",
+        "decision_dropped",
+    ]
+    outcome_code: str | None
+    issues: list[AudienceDecisionIssueResponse]
+
+
+class AudienceDecisionTraceResponse(BaseModel):
+    """Completed public journey for one generated or unmatched outcome."""
+
+    trace_id: str
+    cluster_id: str
+    cluster_name: str | None
+    source_known: bool
+    final_outcome: Literal[
+        "published",
+        "provider_skipped",
+        "validation_dropped",
+    ]
+    events: list[AudienceTraceEventResponse]
 
 
 class TopicAnalysisMetricsResponse(BaseModel):
@@ -163,6 +201,7 @@ class AudienceAnalysisResponse(BaseModel):
     commercial_skips: list[CommercialSkippedClusterResponse]
     provider_skips: list[ProviderSkippedClusterResponse]
     validation_drops: list[DroppedAudienceDecisionResponse]
+    audience_traces: list[AudienceDecisionTraceResponse]
     is_publishable: bool
     metrics: AudienceAnalysisMetricsResponse
 

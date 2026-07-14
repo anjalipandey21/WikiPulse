@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, Request
 
+from ..agent.audience_finalization import ProviderSkippedCluster
 from ..agent.audience_provider import AudienceGenerationProvider
+from ..agent.audience_trace import (
+    AudienceDecisionTrace,
+    AudienceTraceInvariantError,
+    build_audience_decision_traces,
+)
 from ..audience_analysis import AudienceAnalysisResult, analyze_audiences
 from ..clustering.semantic_clustering import ArticleEncoder
 from ..models import Article, AudienceSegment, TopicCluster
@@ -14,9 +20,11 @@ from ..models.audience_api import (
     ArticleResponse,
     AudienceAnalysisMetricsResponse,
     AudienceAnalysisResponse,
+    AudienceDecisionTraceResponse,
     AudienceDecisionIssueResponse,
     AudienceFunnelMetricsResponse,
     AudienceSegmentResponse,
+    AudienceTraceEventResponse,
     AudienceWorkflowMetricsResponse,
     CommercialSkippedClusterResponse,
     DroppedAudienceDecisionResponse,
@@ -85,9 +93,12 @@ def map_audience_analysis_response(
     result: AudienceAnalysisResult,
 ) -> AudienceAnalysisResponse:
     """Map internal stage results to the explicit public API contract."""
-    prepared_ids_by_identity = {
-        id(prepared.cluster): prepared.cluster_id
-        for prepared in result.preparation.clusters
+    trace_projection = build_audience_decision_traces(
+        result.preparation,
+        result.audience_workflow,
+    )
+    traces_by_id = {
+        trace.trace_id: trace for trace in trace_projection.traces
     }
     topic_metrics = result.topic_analysis.metrics
     funnel_metrics = result.metrics
@@ -96,7 +107,12 @@ def map_audience_analysis_response(
     return AudienceAnalysisResponse(
         topics=[_map_topic(cluster) for cluster in result.topic_analysis.topics],
         audience_segments=[
-            _map_segment(segment) for segment in result.segments
+            _map_segment(segment, trace_id)
+            for segment, trace_id in zip(
+                result.segments,
+                trace_projection.segment_trace_ids,
+                strict=True,
+            )
         ],
         unclustered_articles=[
             _map_article(article)
@@ -118,15 +134,19 @@ def map_audience_analysis_response(
             for skipped in result.commercial_skips
         ],
         provider_skips=[
-            ProviderSkippedClusterResponse(
-                cluster_id=prepared_ids_by_identity[id(skipped.cluster)],
-                cluster_name=skipped.cluster.name,
-                reason=skipped.reason,
+            _map_provider_skip(
+                skipped,
+                traces_by_id[trace_id],
             )
-            for skipped in result.provider_skips
+            for skipped, trace_id in zip(
+                result.provider_skips,
+                trace_projection.provider_skip_trace_ids,
+                strict=True,
+            )
         ],
         validation_drops=[
             DroppedAudienceDecisionResponse(
+                trace_id=trace_id,
                 cluster_id=dropped.cluster_id,
                 source_known=dropped.source_cluster is not None,
                 phase=dropped.phase,
@@ -139,7 +159,14 @@ def map_audience_analysis_response(
                     for issue in dropped.issues
                 ],
             )
-            for dropped in result.dropped_decisions
+            for dropped, trace_id in zip(
+                result.dropped_decisions,
+                trace_projection.drop_trace_ids,
+                strict=True,
+            )
+        ],
+        audience_traces=[
+            _map_trace(trace) for trace in trace_projection.traces
         ],
         is_publishable=result.is_publishable,
         metrics=AudienceAnalysisMetricsResponse(
@@ -265,8 +292,12 @@ def _map_topic(cluster: TopicCluster) -> TopicClusterResponse:
     )
 
 
-def _map_segment(segment: AudienceSegment) -> AudienceSegmentResponse:
+def _map_segment(
+    segment: AudienceSegment,
+    trace_id: str,
+) -> AudienceSegmentResponse:
     return AudienceSegmentResponse(
+        trace_id=trace_id,
         id=segment.id,
         name=segment.name,
         description=segment.description,
@@ -280,4 +311,48 @@ def _map_segment(segment: AudienceSegment) -> AudienceSegmentResponse:
         ],
         commercial_confidence=segment.commercial_confidence,
         commercial_confidence_reason=segment.commercial_confidence_reason,
+    )
+
+
+def _map_provider_skip(
+    skipped: ProviderSkippedCluster,
+    trace: AudienceDecisionTrace,
+) -> ProviderSkippedClusterResponse:
+    if not trace.source_known or trace.cluster_name is None:
+        raise AudienceTraceInvariantError(
+            "provider skip must map to a known trace source"
+        )
+    return ProviderSkippedClusterResponse(
+        trace_id=trace.trace_id,
+        cluster_id=trace.cluster_id,
+        cluster_name=trace.cluster_name,
+        reason=skipped.reason,
+    )
+
+
+def _map_trace(
+    trace: AudienceDecisionTrace,
+) -> AudienceDecisionTraceResponse:
+    return AudienceDecisionTraceResponse(
+        trace_id=trace.trace_id,
+        cluster_id=trace.cluster_id,
+        cluster_name=trace.cluster_name,
+        source_known=trace.source_known,
+        final_outcome=trace.final_outcome,
+        events=[
+            AudienceTraceEventResponse(
+                sequence=event.sequence,
+                phase=event.phase,
+                code=event.code,
+                outcome_code=event.outcome_code,
+                issues=[
+                    AudienceDecisionIssueResponse(
+                        code=issue.code,
+                        reference_id=issue.reference_id,
+                    )
+                    for issue in event.issues
+                ],
+            )
+            for event in trace.events
+        ],
     )
