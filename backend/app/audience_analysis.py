@@ -29,6 +29,7 @@ from .filtering.commercial_safety import (
     route_commercial_clusters,
 )
 from .models import AudienceSegment
+from .progress import AnalysisProgressReporter, report_progress
 from .topic_analysis import (
     DEFAULT_TOP_N,
     PageviewClient,
@@ -122,21 +123,36 @@ async def analyze_audiences(
     keyword_top_k: int = DEFAULT_TOP_K,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     min_cluster_size: int = MIN_CLUSTER_SIZE,
+    progress_reporter: AnalysisProgressReporter | None = None,
 ) -> AudienceAnalysisResult:
     """Compose topic analysis, routing, preparation, and bounded generation."""
-    topic_result = await analyze_topics(
-        pageview_client,
-        summary_client,
-        encoder,
-        today_utc=today_utc,
-        top_n=top_n,
-        keyword_top_k=keyword_top_k,
-        similarity_threshold=similarity_threshold,
-        min_cluster_size=min_cluster_size,
-    )
+    topic_arguments = {
+        "today_utc": today_utc,
+        "top_n": top_n,
+        "keyword_top_k": keyword_top_k,
+        "similarity_threshold": similarity_threshold,
+        "min_cluster_size": min_cluster_size,
+    }
+    if progress_reporter is None:
+        topic_result = await analyze_topics(
+            pageview_client,
+            summary_client,
+            encoder,
+            **topic_arguments,
+        )
+    else:
+        topic_result = await analyze_topics(
+            pageview_client,
+            summary_client,
+            encoder,
+            progress_reporter=progress_reporter,
+            **topic_arguments,
+        )
+    await report_progress(progress_reporter, "routing_commercial_clusters")
     routing_result = route_commercial_clusters(topic_result.topics)
     _validate_routing_partition(topic_result, routing_result)
 
+    await report_progress(progress_reporter, "preparing_audience_evidence")
     preparation = prepare_audience_clusters(
         routing_result.eligible_clusters,
         total_analyzed_views=topic_result.metrics.selected_pageviews,
@@ -147,10 +163,17 @@ async def analyze_audiences(
         preparation,
     )
 
-    workflow_result = await run_audience_workflow(
-        preparation,
-        audience_provider,
-    )
+    if progress_reporter is None:
+        workflow_result = await run_audience_workflow(
+            preparation,
+            audience_provider,
+        )
+    else:
+        workflow_result = await run_audience_workflow(
+            preparation,
+            audience_provider,
+            progress_reporter=progress_reporter,
+        )
     segment_cluster_ids = _validate_workflow_partition(
         preparation,
         workflow_result,

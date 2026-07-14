@@ -18,6 +18,7 @@ from .clustering.semantic_clustering import (
 from .clustering.topic_finalization import finalize_topic_clusters
 from .filtering.article_noise import get_noise_reason
 from .models import Article, TopicCluster
+from .progress import AnalysisProgressReporter, report_progress
 from .services.wikipedia_summary_client import WikipediaSummaryError
 
 
@@ -101,22 +102,27 @@ async def analyze_topics(
     keyword_top_k: int = DEFAULT_TOP_K,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     min_cluster_size: int = MIN_CLUSTER_SIZE,
+    progress_reporter: AnalysisProgressReporter | None = None,
 ) -> TopicAnalysisResult:
     """Run the deterministic topic pipeline using caller-owned dependencies."""
     _validate_top_n(top_n)
 
+    await report_progress(progress_reporter, "fetching_pageviews")
     fetched_articles = await pageview_client.fetch_latest_articles(
         today_utc=today_utc
     )
+    await report_progress(progress_reporter, "selecting_articles")
     eligible_articles, rejected_articles = _partition_noise(fetched_articles)
     selected_articles = eligible_articles[:top_n]
+    if selected_articles:
+        await report_progress(progress_reporter, "enriching_summaries")
     enriched_articles = await _enrich_best_effort(
         summary_client,
         selected_articles,
     )
 
-    topics, unclustered_articles = await asyncio.to_thread(
-        _analyze_enriched_articles,
+    await report_progress(progress_reporter, "modeling_topics")
+    topics, unclustered_articles = await _analyze_in_worker(
         enriched_articles,
         encoder=encoder,
         keyword_top_k=keyword_top_k,
@@ -160,6 +166,41 @@ async def analyze_topics(
         rejected_articles=tuple(rejected_articles),
         metrics=metrics,
     )
+
+
+async def _analyze_in_worker(
+    enriched_articles: Sequence[Article],
+    *,
+    encoder: ArticleEncoder,
+    keyword_top_k: int,
+    similarity_threshold: float,
+    min_cluster_size: int,
+) -> tuple[tuple[TopicCluster, ...], tuple[Article, ...]]:
+    """Keep shared encoder work alive until its thread finishes on cancellation."""
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _analyze_enriched_articles,
+            enriched_articles,
+            encoder=encoder,
+            keyword_top_k=keyword_top_k,
+            similarity_threshold=similarity_threshold,
+            min_cluster_size=min_cluster_size,
+        )
+    )
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as cancelled:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        if not worker.cancelled():
+            try:
+                worker.result()
+            except Exception:
+                pass
+        raise cancelled
 
 
 def _validate_top_n(top_n: int) -> None:

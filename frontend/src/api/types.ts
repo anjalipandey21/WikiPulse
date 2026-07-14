@@ -22,6 +22,21 @@ export type AudienceTraceOutcome =
   | 'provider_skipped'
   | 'validation_dropped'
 
+export type AnalysisProgressStage =
+  | 'waiting_for_slot'
+  | 'fetching_pageviews'
+  | 'selecting_articles'
+  | 'enriching_summaries'
+  | 'modeling_topics'
+  | 'routing_commercial_clusters'
+  | 'preparing_audience_evidence'
+  | 'generating_audience_decisions'
+  | 'validating_audience_decisions'
+  | 'revising_audience_decisions'
+  | 'validating_revised_decisions'
+  | 'finalizing_audience_results'
+  | 'assembling_response'
+
 export interface ArticleResponse {
   title: string
   normalized_title: string
@@ -184,3 +199,27 @@ export interface ApiErrorResponse {
     message: string
   }
 }
+
+export interface AudienceAnalysisProgressEvent {
+  type: 'progress'
+  sequence: number
+  stage: AnalysisProgressStage
+}
+
+export interface AudienceAnalysisResultEvent {
+  type: 'result'
+  sequence: number
+  result: AudienceAnalysisResponse
+}
+
+export interface AudienceAnalysisErrorEvent {
+  type: 'error'
+  sequence: number
+  status_code: number
+  error: ApiErrorResponse['error']
+}
+
+export type AudienceAnalysisStreamEvent =
+  | AudienceAnalysisProgressEvent
+  | AudienceAnalysisResultEvent
+  | AudienceAnalysisErrorEvent

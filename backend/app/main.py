@@ -14,6 +14,7 @@ from .agent.audience_provider import AudienceProviderError
 from .agent.audience_workflow import AudienceWorkflowInvariantError
 from .agent.openai_audience_provider import OpenAIAudienceProvider
 from .api.audience_analysis import AudienceAnalysisResources, router
+from .api.analysis_errors import classify_analysis_exception
 from .audience_analysis import AudienceAnalysisInvariantError
 from .clustering.semantic_clustering import MiniLMArticleEncoder
 from .models.audience_api import ApiErrorDetailResponse, ApiErrorResponse
@@ -132,11 +133,8 @@ async def _wikimedia_pageviews_error_handler(
         "Audience analysis Pageviews source failed: %s",
         type(exc).__name__,
     )
-    return _error_response(
-        502,
-        "wikimedia_pageviews_unavailable",
-        "Wikipedia pageview data is temporarily unavailable.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 async def _wikipedia_summary_error_handler(
@@ -147,11 +145,8 @@ async def _wikipedia_summary_error_handler(
         "Audience analysis summary source failed unexpectedly: %s",
         type(exc).__name__,
     )
-    return _error_response(
-        502,
-        "wikipedia_summaries_unavailable",
-        "Wikipedia summaries are temporarily unavailable.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 async def _source_integrity_error_handler(
@@ -159,11 +154,8 @@ async def _source_integrity_error_handler(
     exc: AudienceSourceIntegrityError,
 ) -> JSONResponse:
     logger.error("Audience source integrity failed: code=%s", exc.code)
-    return _error_response(
-        500,
-        exc.code,
-        "Audience source data failed deterministic validation.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 async def _provider_error_handler(
@@ -174,11 +166,8 @@ async def _provider_error_handler(
         "Initial audience provider request failed: %s",
         type(exc).__name__,
     )
-    return _error_response(
-        502,
-        "audience_provider_unavailable",
-        "Audience generation is temporarily unavailable.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 async def _invariant_error_handler(
@@ -186,11 +175,8 @@ async def _invariant_error_handler(
     exc: Exception,
 ) -> JSONResponse:
     logger.error("Audience analysis invariant failed: %s", type(exc).__name__)
-    return _error_response(
-        500,
-        "analysis_invariant_failed",
-        "Audience analysis produced an inconsistent internal result.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 async def _request_validation_error_handler(
@@ -198,11 +184,8 @@ async def _request_validation_error_handler(
     exc: RequestValidationError,
 ) -> JSONResponse:
     logger.info("Audience API request validation failed")
-    return _error_response(
-        422,
-        "request_validation_failed",
-        "The request was not valid.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 async def _unexpected_error_handler(
@@ -210,11 +193,8 @@ async def _unexpected_error_handler(
     exc: Exception,
 ) -> JSONResponse:
     logger.error("Unexpected audience API failure: %s", type(exc).__name__)
-    return _error_response(
-        500,
-        "internal_error",
-        "An unexpected internal error occurred.",
-    )
+    error = classify_analysis_exception(exc)
+    return _error_response(error.status_code, error.code, error.message)
 
 
 def _error_response(status_code: int, code: str, message: str) -> JSONResponse:

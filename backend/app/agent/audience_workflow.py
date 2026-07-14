@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 
 from ..models import AudienceSegment, TopicCluster
 from ..models.audience_generation import AudienceDecision
+from ..progress import AnalysisProgressReporter, AnalysisProgressStage
 from .audience_finalization import (
     AudienceDecisionIssue,
     AudiencePreparation,
@@ -152,13 +153,75 @@ class _AudienceWorkflowState(TypedDict, total=False):
 async def run_audience_workflow(
     preparation: AudiencePreparation,
     provider: AudienceGenerationProvider,
+    *,
+    progress_reporter: AnalysisProgressReporter | None = None,
 ) -> AudienceWorkflowResult:
     """Run the once-compiled graph with at most one targeted revision."""
+    if progress_reporter is not None:
+        return await _stream_audience_workflow(
+            preparation,
+            provider,
+            progress_reporter,
+        )
+
     state = await _AUDIENCE_WORKFLOW_GRAPH.ainvoke(
         {"preparation": preparation},
         context=_AudienceWorkflowContext(provider=provider),
     )
-    result = state.get("result")
+    return _require_workflow_result(state)
+
+
+_NODE_PROGRESS_STAGES: Mapping[str, AnalysisProgressStage] = MappingProxyType(
+    {
+        "build_empty_result": "finalizing_audience_results",
+        "generate_initial": "generating_audience_decisions",
+        "validate_initial": "validating_audience_decisions",
+        "revise_once": "revising_audience_decisions",
+        "validate_revision": "validating_revised_decisions",
+        "merge_and_build_result": "finalizing_audience_results",
+    }
+)
+
+
+async def _stream_audience_workflow(
+    preparation: AudiencePreparation,
+    provider: AudienceGenerationProvider,
+    progress_reporter: AnalysisProgressReporter,
+) -> AudienceWorkflowResult:
+    """Project allowlisted node starts while keeping graph state private."""
+    root_output: object = None
+    included_names = (
+        _AUDIENCE_WORKFLOW_GRAPH.name,
+        *_NODE_PROGRESS_STAGES,
+    )
+    async for event in _AUDIENCE_WORKFLOW_GRAPH.astream_events(
+        {"preparation": preparation},
+        context=_AudienceWorkflowContext(provider=provider),
+        version="v2",
+        include_names=included_names,
+        output_keys=("result",),
+    ):
+        event_name = event.get("name")
+        if event.get("event") == "on_chain_start":
+            stage = _NODE_PROGRESS_STAGES.get(event_name)
+            if stage is not None:
+                await progress_reporter(stage)
+            continue
+        if event.get("event") == "on_chain_end" and not event.get(
+            "parent_ids"
+        ):
+            data = event.get("data")
+            if isinstance(data, Mapping):
+                root_output = data.get("output")
+
+    return _require_workflow_result(root_output)
+
+
+def _require_workflow_result(state: object) -> AudienceWorkflowResult:
+    if not isinstance(state, Mapping):
+        result = None
+    else:
+        result = state.get("result")
     if not isinstance(result, AudienceWorkflowResult):
         raise AudienceWorkflowInvariantError(
             "audience workflow graph did not produce a result"

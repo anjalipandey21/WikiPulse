@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 
 import type {
   AudienceDecisionTraceResponse,
+  AudienceTraceEventResponse,
   AudienceTraceEventCode,
   AudienceTraceOutcome,
 } from '../api/types'
@@ -24,6 +25,63 @@ const OUTCOME_TEXT: Record<AudienceTraceOutcome, string> = {
   published: 'Published audience',
   provider_skipped: 'Provider skip',
   validation_dropped: 'Validation drop',
+}
+
+const EVENT_LABEL: Record<AudienceTraceEventCode, string> = {
+  generation_requested: 'Generation started',
+  decision_received: 'Decision received',
+  validation_passed: 'Validation passed',
+  validation_failed: 'Validation failed',
+  revision_requested: 'Revision requested',
+  revision_failed: 'Revision failed',
+  audience_published: 'Audience published',
+  provider_skipped: 'Audience skipped',
+  decision_dropped: 'Decision dropped',
+}
+
+const SUMMARY_STEP: Partial<Record<AudienceTraceEventCode, string>> = {
+  validation_passed: 'Validated',
+  validation_failed: 'Validation failed',
+  revision_failed: 'Revision failed',
+  audience_published: 'Published',
+  provider_skipped: 'Skipped',
+  decision_dropped: 'Dropped',
+}
+
+function summarizeTraceEvents(
+  events: readonly AudienceTraceEventResponse[],
+): string {
+  const steps: string[] = []
+  let pendingRequest: 'initial' | 'revision' | null = null
+
+  for (const event of events) {
+    if (event.code === 'generation_requested') {
+      steps.push('Generation requested')
+      pendingRequest = 'initial'
+      continue
+    }
+
+    if (event.code === 'revision_requested') {
+      steps.push('Revision requested')
+      pendingRequest = 'revision'
+      continue
+    }
+
+    if (event.code === 'decision_received') {
+      if (pendingRequest) {
+        steps[steps.length - 1] = pendingRequest === 'initial' ? 'Generated' : 'Revised'
+        pendingRequest = null
+      } else {
+        steps.push('Received')
+      }
+      continue
+    }
+
+    const step = SUMMARY_STEP[event.code]
+    if (step) steps.push(step)
+  }
+
+  return steps.join(' → ')
 }
 
 interface AgentJourneyPanelProps {
@@ -49,6 +107,9 @@ export function AgentJourneyPanel({
     if (!disclosure || !target || !disclosure.contains(target)) return
 
     disclosure.open = true
+    if (target.tagName === 'DETAILS') {
+      (target as HTMLDetailsElement).open = true
+    }
     const frame = requestAnimationFrame(() => {
       target.scrollIntoView({ block: 'start' })
       target
@@ -88,55 +149,55 @@ export function AgentJourneyPanel({
             <ol className="journey-list">
               {traces.map((trace) => (
                 <li key={trace.trace_id}>
-                  <article className="journey-card" id={trace.trace_id}>
-                    <header className="journey-card-header">
-                      <div>
-                        <p className="journey-cluster-id">
-                          {trace.source_known ? trace.cluster_id : 'Unmatched output'}
-                        </p>
-                        <h3 tabIndex={-1} data-trace-heading>
-                          {trace.cluster_name ?? 'Unknown source cluster'}
-                        </h3>
-                      </div>
-                      <span className={`journey-outcome outcome-${trace.final_outcome}`}>
-                        {OUTCOME_TEXT[trace.final_outcome]}
+                  <details className="journey-card" id={trace.trace_id}>
+                    <summary className="journey-card-summary" data-trace-heading>
+                      <span className="journey-card-summary-copy">
+                        <span className="journey-card-header">
+                          <span
+                            className="journey-card-title"
+                            role="heading"
+                            aria-level={3}
+                          >
+                            {trace.cluster_name ?? 'Unmatched audience decision'}
+                          </span>
+                          <span
+                            className={`journey-outcome outcome-${trace.final_outcome}`}
+                          >
+                            {OUTCOME_TEXT[trace.final_outcome]}
+                          </span>
+                        </span>
+                        <span className="journey-path">
+                          {summarizeTraceEvents(trace.events)}
+                        </span>
                       </span>
-                    </header>
+                      <span className="journey-disclosure-icon" aria-hidden="true">
+                        +
+                      </span>
+                    </summary>
 
-                    <ol className="journey-events">
-                      {trace.events.map((event) => (
-                        <li key={event.sequence}>
-                          <span className="journey-marker" aria-hidden="true" />
-                          <div>
-                            <p className="journey-event-meta">
-                              <span>{event.phase}</span>
-                              <code>{event.code}</code>
-                            </p>
-                            <p>{EVENT_TEXT[event.code]}</p>
-                            {event.outcome_code ? (
-                              <p className="journey-code">
-                                Outcome code: <code>{event.outcome_code}</code>
+                    <div className="journey-card-content">
+                      <ol className="journey-events">
+                        {trace.events.map((event) => (
+                          <li key={event.sequence}>
+                            <span className="journey-marker" aria-hidden="true" />
+                            <div>
+                              <p className="journey-event-label">
+                                {EVENT_LABEL[event.code]}
                               </p>
-                            ) : null}
-                            {event.issues.length > 0 ? (
-                              <ul className="journey-issues" aria-label="Validation issues">
-                                {event.issues.map((issue, index) => (
-                                  <li key={`${issue.code}-${issue.reference_id ?? 'none'}-${index}`}>
-                                    <code>{issue.code}</code>
-                                    {issue.reference_id ? (
-                                      <span>
-                                        {' '}· reference <code>{issue.reference_id}</code>
-                                      </span>
-                                    ) : null}
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : null}
-                          </div>
-                        </li>
-                      ))}
-                    </ol>
-                  </article>
+                              <p>{EVENT_TEXT[event.code]}</p>
+                              {event.issues.length > 0 ? (
+                                <p className="journey-issue-count">
+                                  {event.issues.length}{' '}
+                                  {event.issues.length === 1 ? 'issue was' : 'issues were'}{' '}
+                                  recorded for this validation step.
+                                </p>
+                              ) : null}
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  </details>
                 </li>
               ))}
             </ol>
