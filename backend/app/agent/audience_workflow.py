@@ -4,7 +4,11 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.runtime import Runtime
 
 from ..models import AudienceSegment, TopicCluster
 from ..models.audience_generation import AudienceDecision
@@ -115,13 +119,66 @@ class AudienceWorkflowResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _AudienceWorkflowContext:
+    """Run-scoped dependencies kept outside serializable graph state."""
+
+    provider: AudienceGenerationProvider
+
+
+class _AudienceWorkflowState(TypedDict, total=False):
+    """Private state for the bounded audience workflow graph."""
+
+    preparation: AudiencePreparation
+    initial_provider_result: AudienceProviderResult
+    initial_report: AudienceValidationReport
+    initial_segments: dict[str, AudienceSegment]
+    initial_skips: dict[str, ProviderSkippedCluster]
+    known_invalid: dict[str, InvalidAudienceDecision]
+    revision_prepared: tuple[PreparedAudienceCluster, ...]
+    revision_requests: tuple[AudienceRevisionRequest, ...]
+    revision_provider_result: AudienceProviderResult | None
+    revision_report: AudienceValidationReport | None
+    revised_segments: dict[str, AudienceSegment]
+    revised_skips: dict[str, ProviderSkippedCluster]
+    source_drops: dict[str, DroppedAudienceDecision]
+    unmatched_drops: tuple[DroppedAudienceDecision, ...]
+    revision_count: int
+    revision_requested_cluster_count: int
+    revision_failed: bool
+    result: AudienceWorkflowResult
+
+
 async def run_audience_workflow(
     preparation: AudiencePreparation,
     provider: AudienceGenerationProvider,
 ) -> AudienceWorkflowResult:
-    """Generate audiences and perform no more than one targeted revision."""
-    if not preparation.clusters:
-        return _build_result(
+    """Run the once-compiled graph with at most one targeted revision."""
+    state = await _AUDIENCE_WORKFLOW_GRAPH.ainvoke(
+        {"preparation": preparation},
+        context=_AudienceWorkflowContext(provider=provider),
+    )
+    result = state.get("result")
+    if not isinstance(result, AudienceWorkflowResult):
+        raise AudienceWorkflowInvariantError(
+            "audience workflow graph did not produce a result"
+        )
+    return result
+
+
+def _route_preparation(
+    state: _AudienceWorkflowState,
+) -> Literal["build_empty_result", "generate_initial"]:
+    if state["preparation"].clusters:
+        return "generate_initial"
+    return "build_empty_result"
+
+
+def _build_empty_result(
+    _state: _AudienceWorkflowState,
+) -> _AudienceWorkflowState:
+    return {
+        "result": _build_result(
             initial_provider_result=None,
             initial_report=None,
             revision_provider_result=None,
@@ -132,8 +189,25 @@ async def run_audience_workflow(
             provider_skips=(),
             dropped_decisions=(),
         )
+    }
 
-    initial_provider_result = await provider.generate(preparation.contexts)
+
+async def _generate_initial(
+    state: _AudienceWorkflowState,
+    runtime: Runtime[_AudienceWorkflowContext],
+) -> _AudienceWorkflowState:
+    provider = runtime.context.provider
+    initial_provider_result = await provider.generate(
+        state["preparation"].contexts
+    )
+    return {"initial_provider_result": initial_provider_result}
+
+
+def _validate_initial(
+    state: _AudienceWorkflowState,
+) -> _AudienceWorkflowState:
+    preparation = state["preparation"]
+    initial_provider_result = state["initial_provider_result"]
     initial_report = finalize_audience_decisions(
         preparation,
         initial_provider_result.response,
@@ -159,28 +233,6 @@ async def run_audience_workflow(
         for invalid in initial_report.invalid_decisions
         if invalid.source_cluster is None
     ]
-
-    if not known_invalid:
-        segments, provider_skips = _merge_outcomes(
-            preparation,
-            initial_segments,
-            initial_skips,
-            {},
-            {},
-            {},
-        )
-        return _build_result(
-            initial_provider_result=initial_provider_result,
-            initial_report=initial_report,
-            revision_provider_result=None,
-            revision_report=None,
-            revision_count=0,
-            revision_requested_cluster_count=0,
-            segments=segments,
-            provider_skips=provider_skips,
-            dropped_decisions=tuple(unmatched_drops),
-        )
-
     revision_prepared = tuple(
         prepared
         for prepared in preparation.clusters
@@ -190,58 +242,130 @@ async def run_audience_workflow(
         _build_revision_request(prepared, known_invalid[prepared.cluster_id])
         for prepared in revision_prepared
     )
-    revision_count = MAX_REVISIONS
-    revision_provider_result: AudienceProviderResult | None = None
-    revision_report: AudienceValidationReport | None = None
-    revised_segments: dict[str, AudienceSegment] = {}
-    revised_skips: dict[str, ProviderSkippedCluster] = {}
-    source_drops: dict[str, DroppedAudienceDecision] = {}
+    return {
+        "initial_report": initial_report,
+        "initial_segments": initial_segments,
+        "initial_skips": initial_skips,
+        "known_invalid": known_invalid,
+        "revision_prepared": revision_prepared,
+        "revision_requests": revision_requests,
+        "revision_provider_result": None,
+        "revision_report": None,
+        "revised_segments": {},
+        "revised_skips": {},
+        "source_drops": {},
+        "unmatched_drops": tuple(unmatched_drops),
+        "revision_count": 0,
+        "revision_requested_cluster_count": 0,
+        "revision_failed": False,
+    }
 
+
+def _route_after_initial_validation(
+    state: _AudienceWorkflowState,
+) -> Literal["revise_once", "merge_and_build_result"]:
+    if state["known_invalid"]:
+        return "revise_once"
+    return "merge_and_build_result"
+
+
+async def _revise_once(
+    state: _AudienceWorkflowState,
+    runtime: Runtime[_AudienceWorkflowContext],
+) -> _AudienceWorkflowState:
+    revision_prepared = state["revision_prepared"]
+    revision_requests = state["revision_requests"]
     try:
-        revision_provider_result = await provider.revise(revision_requests)
+        revision_provider_result = await runtime.context.provider.revise(
+            revision_requests
+        )
     except AudienceProviderError:
         source_drops = {
             prepared.cluster_id: _drop_from_invalid(
-                known_invalid[prepared.cluster_id],
+                state["known_invalid"][prepared.cluster_id],
                 phase="revision",
                 drop_code=REVISION_PROVIDER_FAILURE,
             )
             for prepared in revision_prepared
         }
-    else:
-        revision_preparation = _subset_preparation(
-            preparation,
-            revision_prepared,
-        )
-        revision_report = finalize_audience_decisions(
-            revision_preparation,
-            revision_provider_result.response,
-        )
-        revised_segments = _index_segments(
-            revision_report.valid_segments,
-            revision_preparation,
-        )
-        revised_skips = _index_skips(
-            revision_report.provider_skips,
-            revision_preparation,
-        )
-        for invalid in revision_report.invalid_decisions:
-            dropped = _drop_from_invalid(
-                invalid,
-                phase="revision",
-                drop_code=UNRESOLVED_AFTER_REVISION,
-            )
-            if invalid.source_cluster is None:
-                unmatched_drops.append(dropped)
-            else:
-                source_drops[invalid.cluster_id] = dropped
+        return {
+            "revision_count": MAX_REVISIONS,
+            "revision_requested_cluster_count": len(revision_requests),
+            "source_drops": source_drops,
+            "revision_failed": True,
+        }
+    return {
+        "revision_count": MAX_REVISIONS,
+        "revision_requested_cluster_count": len(revision_requests),
+        "revision_provider_result": revision_provider_result,
+        "revision_failed": False,
+    }
 
+
+def _route_after_revision(
+    state: _AudienceWorkflowState,
+) -> Literal["validate_revision", "merge_and_build_result"]:
+    if state["revision_failed"]:
+        return "merge_and_build_result"
+    return "validate_revision"
+
+
+def _validate_revision(
+    state: _AudienceWorkflowState,
+) -> _AudienceWorkflowState:
+    revision_provider_result = state["revision_provider_result"]
+    if revision_provider_result is None:
+        raise AudienceWorkflowInvariantError(
+            "revision validation requires a provider result"
+        )
+    revision_preparation = _subset_preparation(
+        state["preparation"],
+        state["revision_prepared"],
+    )
+    revision_report = finalize_audience_decisions(
+        revision_preparation,
+        revision_provider_result.response,
+    )
+    revised_segments = _index_segments(
+        revision_report.valid_segments,
+        revision_preparation,
+    )
+    revised_skips = _index_skips(
+        revision_report.provider_skips,
+        revision_preparation,
+    )
+    source_drops = dict(state["source_drops"])
+    unmatched_drops = list(state["unmatched_drops"])
+    for invalid in revision_report.invalid_decisions:
+        dropped = _drop_from_invalid(
+            invalid,
+            phase="revision",
+            drop_code=UNRESOLVED_AFTER_REVISION,
+        )
+        if invalid.source_cluster is None:
+            unmatched_drops.append(dropped)
+        else:
+            source_drops[invalid.cluster_id] = dropped
+    return {
+        "revision_report": revision_report,
+        "revised_segments": revised_segments,
+        "revised_skips": revised_skips,
+        "source_drops": source_drops,
+        "unmatched_drops": tuple(unmatched_drops),
+    }
+
+
+def _merge_and_build_result(
+    state: _AudienceWorkflowState,
+) -> _AudienceWorkflowState:
+    preparation = state["preparation"]
+    source_drops = state["source_drops"]
     segments, provider_skips = _merge_outcomes(
         preparation,
-        initial_segments,
-        initial_skips,
-        revised_segments,
-        revised_skips,
+        state["initial_segments"],
+        state["initial_skips"],
+        state["revised_segments"],
+        state["revised_skips"],
         source_drops,
     )
     ordered_source_drops = tuple(
@@ -249,17 +373,46 @@ async def run_audience_workflow(
         for prepared in preparation.clusters
         if prepared.cluster_id in source_drops
     )
-    return _build_result(
-        initial_provider_result=initial_provider_result,
-        initial_report=initial_report,
-        revision_provider_result=revision_provider_result,
-        revision_report=revision_report,
-        revision_count=revision_count,
-        revision_requested_cluster_count=len(revision_requests),
+    result = _build_result(
+        initial_provider_result=state["initial_provider_result"],
+        initial_report=state["initial_report"],
+        revision_provider_result=state["revision_provider_result"],
+        revision_report=state["revision_report"],
+        revision_count=state["revision_count"],
+        revision_requested_cluster_count=(
+            state["revision_requested_cluster_count"]
+        ),
         segments=segments,
         provider_skips=provider_skips,
-        dropped_decisions=ordered_source_drops + tuple(unmatched_drops),
+        dropped_decisions=(
+            ordered_source_drops + state["unmatched_drops"]
+        ),
     )
+    return {"result": result}
+
+
+def _build_audience_workflow_graph() -> CompiledStateGraph:
+    graph = StateGraph(
+        _AudienceWorkflowState,
+        context_schema=_AudienceWorkflowContext,
+    )
+    graph.add_node("build_empty_result", _build_empty_result)
+    graph.add_node("generate_initial", _generate_initial)
+    graph.add_node("validate_initial", _validate_initial)
+    graph.add_node("revise_once", _revise_once)
+    graph.add_node("validate_revision", _validate_revision)
+    graph.add_node("merge_and_build_result", _merge_and_build_result)
+    graph.add_conditional_edges(START, _route_preparation)
+    graph.add_edge("build_empty_result", END)
+    graph.add_edge("generate_initial", "validate_initial")
+    graph.add_conditional_edges(
+        "validate_initial",
+        _route_after_initial_validation,
+    )
+    graph.add_conditional_edges("revise_once", _route_after_revision)
+    graph.add_edge("validate_revision", "merge_and_build_result")
+    graph.add_edge("merge_and_build_result", END)
+    return graph.compile()
 
 
 def _build_revision_request(
@@ -501,3 +654,6 @@ def _build_result(
         metrics=metrics,
         is_publishable=True,
     )
+
+
+_AUDIENCE_WORKFLOW_GRAPH = _build_audience_workflow_graph()
