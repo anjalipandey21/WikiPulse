@@ -4,3 +4,4 @@ openai
 pydantic
 scikit-learn
 sentence-transformers
+uvicorn

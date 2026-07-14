@@ -65,9 +65,12 @@ class OpenAIAudienceProvider:
         client: AsyncOpenAI,
         *,
         model: str = DEFAULT_OPENAI_AUDIENCE_MODEL,
+        owns_client: bool = False,
     ) -> None:
         self._client = client
         self._model = model
+        self._owns_client = owns_client
+        self._closed = False
 
     @classmethod
     def from_environment(
@@ -92,7 +95,14 @@ class OpenAIAudienceProvider:
             timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
             max_retries=OPENAI_MAX_RETRIES,
         )
-        return cls(client, model=model)
+        return cls(client, model=model, owns_client=True)
+
+    async def aclose(self) -> None:
+        """Close an owned SDK client at most once."""
+        if not self._owns_client or self._closed:
+            return
+        self._closed = True
+        await self._client.close()
 
     async def generate(
         self,
