@@ -654,21 +654,6 @@ Run the current backend as a single coordinated application instance unless the 
 - Validate all external API responses
 - Treat public data as untrusted input
 
-Recommended local ignore rules include:
-
-```gitignore
-.env
-.env.*
-!.env.example
-.venv/
-node_modules/
-dist/
-__pycache__/
-*.pyc
-*.sqlite
-*.sqlite3
-```
-
 ---
 
 ## Challenge Alignment
