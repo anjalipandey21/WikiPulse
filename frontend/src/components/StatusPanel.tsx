@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 interface StatusPanelProps {
+  children?: ReactNode
   eyebrow: string
   title: string
   message: string
@@ -11,6 +12,7 @@ interface StatusPanelProps {
 }
 
 export function StatusPanel({
+  children,
   eyebrow,
   title,
   message,
@@ -29,6 +31,7 @@ export function StatusPanel({
       <p className="eyebrow">{eyebrow}</p>
       <h2>{title}</h2>
       <p>{message}</p>
+      {children ? <div className="status-panel-detail">{children}</div> : null}
       {actionLabel && onAction ? (
         <button
           className="button button-primary"

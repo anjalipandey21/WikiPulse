@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "pretest": "tsc -p tsconfig.test.json",
-    "test": "node --test ./dist/test-output/tests/audienceAnalysis.test.js ./dist/test-output/tests/agentJourneyPanel.test.js",
+    "test": "node --test ./dist/test-output/tests/*.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

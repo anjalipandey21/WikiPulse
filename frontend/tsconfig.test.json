@@ -12,9 +12,9 @@
     "lib": ["ES2023", "DOM"]
   },
   "include": [
-    "src/api/audienceAnalysis.ts",
-    "src/api/types.ts",
-    "src/components/AgentJourneyPanel.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
     "tests/**/*.ts"
-  ]
+  ],
+  "exclude": ["src/main.tsx"]
 }
