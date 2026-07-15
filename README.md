@@ -29,7 +29,7 @@ Each generated audience can include:
 
 ## Demo
 
-> Add your screen-recording link here before submission.
+> Coming Soon.
 
 Suggested demo flow:
 
