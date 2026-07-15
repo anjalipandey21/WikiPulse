@@ -35,6 +35,13 @@ Keep the MVP limited to:
 
 Do not add authentication, user accounts, a production database, queues, Kubernetes resources, or unrelated product features unless explicitly requested.
 
+### Human-review persistence and deployment limitation
+
+- Phase 3 stores Human Review checkpoints and minimal run/receipt indexes in SQLite. The default ignored runtime file is `backend/data/wikipulse_review.db`; override it with `WIKIPULSE_REVIEW_DB_PATH`.
+- Restart hydration is read-only and preserves pending/terminal runs, absolute expiry, and completed start/command idempotency.
+- The backend must still run with one application worker; multi-worker coordination is deferred.
+- An analyst edit interrupted by process failure is never repeated automatically. The hydrated run fails safely and the analyst must start a new analysis.
+
 ## Required architecture
 
 Keep these concerns separate:

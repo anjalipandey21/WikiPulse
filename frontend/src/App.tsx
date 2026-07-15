@@ -12,8 +12,15 @@ import {
   AgentJourneyPanel,
   type AgentJourneyRequest,
 } from './components/AgentJourneyPanel'
+import {
+  AnalysisModeSelector,
+  type AnalysisMode,
+} from './components/AnalysisModeSelector'
+import { AudienceReviewWorkspace } from './components/AudienceReviewWorkspace'
 import { AudiencePortfolio } from './components/AudiencePortfolio'
+import { AnalysisPipelineSummary } from './components/AnalysisPipelineSummary'
 import { DiagnosticsPanel } from './components/DiagnosticsPanel'
+import { LiveAttentionTicker } from './components/LiveAttentionTicker'
 import { MetricSummary } from './components/MetricSummary'
 import { StatusPanel } from './components/StatusPanel'
 import { TopicLandscape } from './components/TopicLandscape'
@@ -41,6 +48,7 @@ const PROGRESS_COPY: Record<AnalysisProgressStage, string> = {
 }
 
 export function App() {
+  const [mode, setMode] = useState<AnalysisMode>('standard')
   const [result, setResult] = useState<AudienceAnalysisResponse | null>(null)
   const [selectedTopicId, setSelectedTopicId] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -127,7 +135,7 @@ export function App() {
           </span>
         </a>
 
-        {result ? (
+        {result && mode === 'standard' ? (
           <button
             className="button button-secondary"
             type="button"
@@ -139,8 +147,17 @@ export function App() {
         ) : null}
       </header>
 
+      {mode === 'standard' && result ? (
+        <LiveAttentionTicker result={result} />
+      ) : null}
+
       <main id="main-content" aria-busy={isLoading}>
         <h1 className="visually-hidden">WikiPulse audience analysis dashboard</h1>
+
+        <AnalysisModeSelector mode={mode} onChange={setMode} />
+
+        {mode === 'review' ? <AudienceReviewWorkspace /> : (
+          <>
 
         {!result && !isLoading && !error ? (
           <div className="welcome-state">
@@ -151,7 +168,7 @@ export function App() {
             </div>
             <StatusPanel
               eyebrow="Seven days of public attention"
-              title="See what the world is reading—and who it reveals."
+              title="See what the world is reading and who it reveals."
               message="WikiPulse turns the latest seven complete days of English Wikipedia pageviews into coherent topics and commercially safe, evidence-backed audiences."
               actionLabel="Run weekly analysis"
               onAction={handleRunAnalysis}
@@ -171,7 +188,9 @@ export function App() {
             message={progressStage ? PROGRESS_COPY[progressStage] : 'Starting one serialized analysis request.'}
             icon={<span className="loading-ring" />}
             busy
-          />
+          >
+            <AnalysisPipelineSummary stage={progressStage} />
+          </StatusPanel>
         ) : null}
 
         {!result && error ? (
@@ -242,6 +261,11 @@ export function App() {
 
             <MetricSummary metrics={result.metrics} />
 
+            <AnalysisPipelineSummary
+              stage={isLoading ? progressStage : null}
+              result={isLoading ? null : result}
+            />
+
             {result.topics.length > 0 ? (
               <TopicLandscape
                 topics={result.topics}
@@ -281,6 +305,8 @@ export function App() {
             />
           </div>
         ) : null}
+          </>
+        )}
       </main>
 
       <footer className="site-footer">

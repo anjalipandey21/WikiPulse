@@ -1,5 +1,6 @@
 import type { AudienceAnalysisMetricsResponse } from '../api/types'
-import { formatCompactNumber, formatExactNumber } from '../formatters'
+import { formatCompactNumber, formatExactNumber } from '../formatters.js'
+import { CountUpMetric } from './CountUpMetric.js'
 
 interface MetricSummaryProps {
   metrics: AudienceAnalysisMetricsResponse
@@ -11,20 +12,24 @@ export function MetricSummary({ metrics }: MetricSummaryProps) {
   const items = [
     {
       label: 'Selected pageviews',
-      value: formatCompactNumber(topic.selected_pageviews),
+      value: topic.selected_pageviews,
+      format: formatCompactNumber,
       exact: formatExactNumber(topic.selected_pageviews),
     },
     {
       label: 'Topic clusters',
-      value: formatExactNumber(topic.topic_cluster_count),
+      value: topic.topic_cluster_count,
+      format: formatExactNumber,
     },
     {
       label: 'Clustered articles',
-      value: formatExactNumber(topic.clustered_article_count),
+      value: topic.clustered_article_count,
+      format: formatExactNumber,
     },
     {
       label: 'Audience segments',
-      value: formatExactNumber(funnel.final_segment_count),
+      value: funnel.final_segment_count,
+      format: formatExactNumber,
     },
   ]
 
@@ -33,7 +38,9 @@ export function MetricSummary({ metrics }: MetricSummaryProps) {
       {items.map((item) => (
         <div className="metric-summary-item" key={item.label}>
           <dt>{item.label}</dt>
-          <dd title={item.exact}>{item.value}</dd>
+          <dd title={item.exact}>
+            <CountUpMetric value={item.value} format={item.format} />
+          </dd>
         </div>
       ))}
     </dl>

@@ -26,6 +26,7 @@ from app.audience_analysis import (
     WORKFLOW_PARTITION_MISMATCH,
     AudienceAnalysisInvariantError,
     analyze_audiences,
+    prepare_audience_analysis,
 )
 from app.filtering.commercial_safety import (
     LOW_COHESION_REASON,
@@ -197,6 +198,38 @@ class FakeAudienceProvider:
 
 
 class AudienceAnalysisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_standard_and_review_modes_share_identical_preparation(self) -> None:
+        cluster = make_cluster("eligible", (400, 300))
+        topic_result = make_topic_result([cluster], selected_pageviews=700)
+        provider = FakeAudienceProvider(
+            AudienceGenerationResponse(
+                decisions=[make_create_decision("eligible")]
+            )
+        )
+
+        with patch(
+            "app.audience_analysis.analyze_topics",
+            new=AsyncMock(side_effect=[topic_result, topic_result]),
+        ):
+            review_input = await prepare_audience_analysis(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+            )
+            standard = await analyze_audiences(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                provider,
+            )
+
+        self.assertEqual(review_input.topic_analysis, standard.topic_analysis)
+        self.assertEqual(
+            review_input.commercial_routing,
+            standard.commercial_routing,
+        )
+        self.assertEqual(review_input.preparation, standard.preparation)
+
     async def test_reports_routing_preparation_and_graph_boundaries(self) -> None:
         cluster = make_cluster("eligible", (400, 300))
         topic_result = make_topic_result(
