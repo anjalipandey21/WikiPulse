@@ -13,7 +13,7 @@ Built for the **AI Builder Candidate Challenge — Trending Audience Builder (Pu
 ## Demo
 
 - **Application:** Run locally using the instructions below
-- **Demo video:** _Add your final screen-recording link here_
+- **Demo video:** 
 - **Repository:** `https://github.com/anjalipandey21/WikiPulse`
 
 <!-- Add final screenshots before submission, for example:
