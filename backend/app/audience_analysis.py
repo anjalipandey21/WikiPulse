@@ -112,6 +112,15 @@ class AudienceAnalysisResult:
         return self.audience_workflow.is_publishable
 
 
+@dataclass(frozen=True, slots=True)
+class AudienceAnalysisPreparationResult:
+    """Shared deterministic input to automatic or analyst-review workflows."""
+
+    topic_analysis: TopicAnalysisResult
+    commercial_routing: CommercialSafetyResult
+    preparation: AudiencePreparation
+
+
 async def analyze_audiences(
     pageview_client: PageviewClient,
     summary_client: SummaryClient,
@@ -126,6 +135,65 @@ async def analyze_audiences(
     progress_reporter: AnalysisProgressReporter | None = None,
 ) -> AudienceAnalysisResult:
     """Compose topic analysis, routing, preparation, and bounded generation."""
+    prepared = await prepare_audience_analysis(
+        pageview_client,
+        summary_client,
+        encoder,
+        today_utc=today_utc,
+        top_n=top_n,
+        keyword_top_k=keyword_top_k,
+        similarity_threshold=similarity_threshold,
+        min_cluster_size=min_cluster_size,
+        progress_reporter=progress_reporter,
+    )
+    preparation = prepared.preparation
+    topic_result = prepared.topic_analysis
+    routing_result = prepared.commercial_routing
+
+    if progress_reporter is None:
+        workflow_result = await run_audience_workflow(
+            preparation,
+            audience_provider,
+        )
+    else:
+        workflow_result = await run_audience_workflow(
+            preparation,
+            audience_provider,
+            progress_reporter=progress_reporter,
+        )
+    segment_cluster_ids = _validate_workflow_partition(
+        preparation,
+        workflow_result,
+    )
+    metrics = _build_metrics(
+        topic_result,
+        routing_result,
+        preparation,
+        workflow_result,
+        segment_cluster_ids,
+    )
+    return AudienceAnalysisResult(
+        topic_analysis=topic_result,
+        commercial_routing=routing_result,
+        preparation=preparation,
+        audience_workflow=workflow_result,
+        metrics=metrics,
+    )
+
+
+async def prepare_audience_analysis(
+    pageview_client: PageviewClient,
+    summary_client: SummaryClient,
+    encoder: ArticleEncoder,
+    *,
+    today_utc: date | None = None,
+    top_n: int = DEFAULT_TOP_N,
+    keyword_top_k: int = DEFAULT_TOP_K,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    min_cluster_size: int = MIN_CLUSTER_SIZE,
+    progress_reporter: AnalysisProgressReporter | None = None,
+) -> AudienceAnalysisPreparationResult:
+    """Build the one authoritative preparation shared by both product modes."""
     topic_arguments = {
         "today_utc": today_utc,
         "top_n": top_n,
@@ -163,34 +231,10 @@ async def analyze_audiences(
         preparation,
     )
 
-    if progress_reporter is None:
-        workflow_result = await run_audience_workflow(
-            preparation,
-            audience_provider,
-        )
-    else:
-        workflow_result = await run_audience_workflow(
-            preparation,
-            audience_provider,
-            progress_reporter=progress_reporter,
-        )
-    segment_cluster_ids = _validate_workflow_partition(
-        preparation,
-        workflow_result,
-    )
-    metrics = _build_metrics(
-        topic_result,
-        routing_result,
-        preparation,
-        workflow_result,
-        segment_cluster_ids,
-    )
-    return AudienceAnalysisResult(
+    return AudienceAnalysisPreparationResult(
         topic_analysis=topic_result,
         commercial_routing=routing_result,
         preparation=preparation,
-        audience_workflow=workflow_result,
-        metrics=metrics,
     )
 
 
