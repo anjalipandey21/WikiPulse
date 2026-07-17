@@ -6,10 +6,16 @@ import logging
 import os
 from pathlib import Path
 from typing import AsyncIterator
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+load_dotenv(
+    Path(__file__).resolve().parents[1] / ".env",
+    override=False,
+)
 
 from .agent.audience_finalization import AudienceSourceIntegrityError
 from .agent.audience_provider import AudienceProviderError

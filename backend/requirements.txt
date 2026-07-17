@@ -7,3 +7,4 @@ pydantic
 scikit-learn
 sentence-transformers
 uvicorn
+python-dotenv
