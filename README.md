@@ -29,7 +29,7 @@ Each generated audience can include:
 
 ## Demo
 
-> Coming Soon.
+> https://wikipulse-ai.vercel.app/
 
 Suggested demo flow:
 
