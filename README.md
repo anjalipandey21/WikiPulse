@@ -27,9 +27,9 @@ Each generated audience can include:
 - Commercial-confidence score
 - Supporting Wikipedia evidence
 
-## Demo
+## Live Link
 
-> https://wikipulse-ai.vercel.app/
+>https://wikipulse-ai.vercel.app/
 
 Suggested demo flow:
 
